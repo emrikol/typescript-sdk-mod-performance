@@ -36,7 +36,7 @@ import type {
     InboundLegacyRoute,
     InboundModernRoute,
     RequestId
-} from '@modelcontextprotocol/core-internal';
+} from '@modelcontextprotocol/core-internal/server-runtime';
 import {
     classifyInboundRequest,
     CLIENT_CAPABILITIES_META_KEY,
@@ -49,7 +49,6 @@ import {
     modernOnlyStrictRejection,
     requestMetaOf,
     requiredClientCapabilitiesForRequest,
-    scanXMcpHeaderDeclarations,
     SdkError,
     SdkErrorCode,
     setNegotiatedProtocolVersion,
@@ -57,7 +56,7 @@ import {
     UnsupportedProtocolVersionError,
     validateMcpParamHeaders,
     validateStandardRequestHeaders
-} from '@modelcontextprotocol/core-internal';
+} from '@modelcontextprotocol/core-internal/server-runtime';
 
 import { invoke } from './invoke';
 import { createListenRouter, DEFAULT_MAX_SUBSCRIPTIONS } from './listenRouter';
@@ -431,9 +430,18 @@ type EntryClassification =
     /** The body bytes could not be read at all (a failing stream, not malformed JSON). */
     | { step: 'unreadable-body' }
     /** A POST with an empty or non-JSON body: nothing to classify, so there is no envelope claim. */
-    | { step: 'no-json-body'; forwardRequest: Request }
+    | { step: 'no-json-body'; forwardRequest: () => Request }
     /** A classifiable request, with the classifier's routing outcome. */
-    | { step: 'classified'; outcome: InboundClassificationOutcome; body: unknown; parsedBody: unknown; forwardRequest: Request };
+    | {
+          step: 'classified';
+          outcome: InboundClassificationOutcome;
+          body: unknown;
+          parsedBody: unknown;
+          standardHeaders: Omit<InboundHttpRequest, 'httpMethod' | 'body'>;
+          forwardRequest: () => Request;
+      };
+
+const UTF8_DECODER = new TextDecoder();
 
 /**
  * The entry's classification step: read the request body exactly once (unless
@@ -442,29 +450,32 @@ type EntryClassification =
  * {@linkcode createMcpHandler}'s routing and the exported
  * {@linkcode isLegacyRequest} predicate, so the two can never disagree.
  *
- * Pass `needsForward: false` when the caller never reads `forwardRequest` —
- * the body-preserving clone is then skipped and `forwardRequest` is the
- * (consumed) input request.
+ * `forwardRequest` is lazy: modern traffic never constructs a second Request;
+ * a legacy route rebuilds one from the exact bytes read for classification.
+ * Pass `needsForward: false` when the caller already retained its own request.
  */
 async function classifyEntryRequest(request: Request, providedParsedBody?: unknown, needsForward = true): Promise<EntryClassification> {
     const httpMethod = request.method.toUpperCase();
 
     let body: unknown;
     let parsedBody = providedParsedBody;
-    let forwardRequest = request;
+    let bodyBytes: Uint8Array | undefined;
+    const forwardRequest = () => {
+        if (!needsForward || bodyBytes === undefined) return request;
+        return new Request(request, { method: 'POST', body: bodyBytes });
+    };
     let unparseable = false;
 
     if (httpMethod === 'POST') {
         if (parsedBody === undefined) {
-            // Read the body exactly once for classification, keeping an unread
-            // copy of the original bytes for the legacy leg (web-standard
-            // request bodies are single-use) when the caller needs it.
-            if (needsForward) {
-                forwardRequest = request.clone();
-            }
+            // Read the body exactly once. If classification later selects the
+            // legacy leg, forwardRequest reconstructs an unread Request from
+            // these exact bytes; modern traffic pays no Request.clone/body-tee
+            // allocation.
             let bodyText: string;
             try {
-                bodyText = await request.text();
+                bodyBytes = new Uint8Array(await request.arrayBuffer());
+                bodyText = UTF8_DECODER.decode(bodyBytes);
             } catch {
                 return { step: 'unreadable-body' };
             }
@@ -485,12 +496,13 @@ async function classifyEntryRequest(request: Request, providedParsedBody?: unkno
         }
     }
 
+    const standardHeaders = standardHeadersOf(request);
     const outcome = classifyInboundRequest({
         httpMethod,
-        ...standardHeadersOf(request),
+        ...standardHeaders,
         ...(body !== undefined && { body })
     });
-    return { step: 'classified', outcome, body, parsedBody, forwardRequest };
+    return { step: 'classified', outcome, body, parsedBody, standardHeaders, forwardRequest };
 }
 
 /**
@@ -665,7 +677,12 @@ export function createMcpHandler(factory: McpServerFactory, options: CreateMcpHa
     const legacyHandler: LegacyHttpHandler | undefined =
         legacy === 'reject' ? undefined : createLegacyStatelessFallback(factory, reportError, options.keepAliveMs);
 
-    async function serveModern(route: InboundModernRoute, request: Request, authInfo: AuthInfo | undefined): Promise<Response> {
+    async function serveModern(
+        route: InboundModernRoute,
+        request: Request,
+        authInfo: AuthInfo | undefined,
+        standardHeaders: Omit<InboundHttpRequest, 'httpMethod' | 'body'>
+    ): Promise<Response> {
         const claimedRevision = route.classification.revision;
         if (claimedRevision === undefined || !SUPPORTED_MODERN_PROTOCOL_VERSIONS.includes(claimedRevision)) {
             // The claim names a revision this endpoint does not serve (an
@@ -692,7 +709,7 @@ export function createMcpHandler(factory: McpServerFactory, options: CreateMcpHa
         // before the capability gate, the factory call, and the
         // `Mcp-Param-*` rung so a request that fails several rungs is
         // answered by the standard-header rung first.
-        const stdHeaderRejection = validateStandardRequestHeaders({ httpMethod: request.method, ...standardHeadersOf(request) }, route);
+        const stdHeaderRejection = validateStandardRequestHeaders({ httpMethod: request.method, ...standardHeaders }, route);
         if (stdHeaderRejection !== undefined) {
             reportError(new Error(`Rejected inbound request (${stdHeaderRejection.cell}): ${stdHeaderRejection.message}`));
             return rejectionResponse(stdHeaderRejection, echoableRequestId(route.message));
@@ -765,16 +782,13 @@ export function createMcpHandler(factory: McpServerFactory, options: CreateMcpHa
         if (route.messageKind === 'request' && route.message.method === 'tools/call' && product instanceof McpServer) {
             const callParams = route.message.params as { name?: string; arguments?: Record<string, unknown> } | undefined;
             const toolName = typeof callParams?.name === 'string' ? callParams.name : undefined;
-            const inputSchema = toolName === undefined ? undefined : product.toolInputSchemaJson(toolName);
-            if (inputSchema !== undefined) {
-                const scan = scanXMcpHeaderDeclarations(inputSchema);
-                if (scan.valid && scan.declarations.length > 0) {
-                    const rejection = validateMcpParamHeaders(scan.declarations, callParams?.arguments, request.headers);
-                    if (rejection !== undefined) {
-                        void product.close().catch(reportError);
-                        reportError(new Error(`Rejected inbound request (${rejection.cell}): ${rejection.message}`));
-                        return rejectionResponse(rejection, route.message.id);
-                    }
+            const scan = toolName === undefined ? undefined : product.toolInputHeaderScan(toolName);
+            if (scan?.valid && scan.declarations.length > 0) {
+                const rejection = validateMcpParamHeaders(scan.declarations, callParams?.arguments, request.headers);
+                if (rejection !== undefined) {
+                    void product.close().catch(reportError);
+                    reportError(new Error(`Rejected inbound request (${rejection.cell}): ${rejection.message}`));
+                    return rejectionResponse(rejection, route.message.id);
                 }
             }
         }
@@ -877,12 +891,12 @@ export function createMcpHandler(factory: McpServerFactory, options: CreateMcpHa
             // answers its own parse error, unchanged), and a parse error
             // otherwise.
             if (legacyHandler !== undefined) {
-                return legacyHandler(classified.forwardRequest, { ...(authInfo !== undefined && { authInfo }) });
+                return legacyHandler(classified.forwardRequest(), { ...(authInfo !== undefined && { authInfo }) });
             }
             return jsonRpcErrorResponse(400, -32_700, 'Parse error: the request body is not valid JSON');
         }
 
-        const { outcome, body, parsedBody, forwardRequest } = classified;
+        const { outcome, body, parsedBody, standardHeaders, forwardRequest } = classified;
         try {
             switch (outcome.kind) {
                 case 'reject': {
@@ -890,10 +904,10 @@ export function createMcpHandler(factory: McpServerFactory, options: CreateMcpHa
                     return rejectionResponse(outcome, echoableRequestId(body));
                 }
                 case 'modern': {
-                    return await serveModern(outcome, request, authInfo);
+                    return await serveModern(outcome, request, authInfo, standardHeaders);
                 }
                 case 'legacy': {
-                    return await serveLegacyRoute(outcome, forwardRequest, authInfo, parsedBody);
+                    return await serveLegacyRoute(outcome, forwardRequest(), authInfo, parsedBody);
                 }
             }
         } catch (error) {

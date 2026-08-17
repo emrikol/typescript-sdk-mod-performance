@@ -231,7 +231,7 @@ export function hasNotificationMethod2025(method: string): method is Rev2025Noti
 }
 
 /** Result-map membership: exactly the era's typed-method subset (no task entries, no 2026-only methods). */
-function hasResultMethod(method: string): method is Rev2025TypedRequestMethod {
+export function hasResultMethod2025(method: string): method is Rev2025TypedRequestMethod {
     return Object.prototype.hasOwnProperty.call(resultMethodKeys, method);
 }
 
@@ -245,7 +245,7 @@ function hasResultMethod(method: string): method is Rev2025TypedRequestMethod {
 export function getResultSchema<M extends Rev2025TypedRequestMethod>(method: M): z.ZodType<ResultTypeMap[M]>;
 export function getResultSchema(method: string): z.ZodType | undefined;
 export function getResultSchema(method: string): z.ZodType | undefined {
-    return hasResultMethod(method) ? registryMaps().resultSchemas[method] : undefined;
+    return hasResultMethod2025(method) ? registryMaps().resultSchemas[method] : undefined;
 }
 
 /**

@@ -7,6 +7,7 @@
     "homepage": "https://modelcontextprotocol.io",
     "bugs": "https://github.com/modelcontextprotocol/typescript-sdk/issues",
     "type": "module",
+    "sideEffects": false,
     "repository": {
         "type": "git",
         "url": "git+https://github.com/modelcontextprotocol/typescript-sdk.git"
@@ -28,6 +29,16 @@
             "require": {
                 "types": "./dist/index.d.cts",
                 "default": "./dist/index.cjs"
+            }
+        },
+        "./runtime": {
+            "import": {
+                "types": "./dist/runtime.d.mts",
+                "default": "./dist/runtime.mjs"
+            },
+            "require": {
+                "types": "./dist/runtime.d.cts",
+                "default": "./dist/runtime.cjs"
             }
         },
         "./stdio": {
@@ -107,6 +118,9 @@
     "types": "./dist/index.d.mts",
     "typesVersions": {
         "*": {
+            "runtime": [
+                "dist/runtime.d.mts"
+            ],
             "validators/ajv": [
                 "dist/validators/ajv.d.mts"
             ],

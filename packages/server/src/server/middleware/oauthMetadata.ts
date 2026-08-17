@@ -1,5 +1,5 @@
-import type { OAuthMetadata, OAuthProtectedResourceMetadata } from '@modelcontextprotocol/core-internal';
-import { OAuthError, OAuthErrorCode } from '@modelcontextprotocol/core-internal';
+import type { OAuthMetadata, OAuthProtectedResourceMetadata } from '@modelcontextprotocol/core-internal/server-runtime';
+import { OAuthError, OAuthErrorCode } from '@modelcontextprotocol/core-internal/server-runtime';
 
 /**
  * Options for {@link oauthMetadataResponse} and

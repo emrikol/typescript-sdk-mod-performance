@@ -51,17 +51,15 @@ import type {
     Transport,
     UnsubscribeRequest,
     XMcpHeaderScanResult
-} from '@modelcontextprotocol/core-internal';
+} from '@modelcontextprotocol/core-internal/client-runtime';
 import {
     buildMcpParamHeaders,
     codecForVersion,
     DEFAULT_REQUEST_TIMEOUT_MSEC,
-    DiscoverResultSchema,
     HEADER_MISMATCH_ERROR_CODE,
     isJSONRPCErrorResponse,
     isJSONRPCRequest,
     isModernProtocolVersion,
-    isSpecType,
     legacyProtocolVersions,
     ListChangedOptionsBaseSchema,
     mergeCapabilities,
@@ -78,7 +76,7 @@ import {
     SERVER_INFO_META_KEY,
     SUBSCRIPTION_ID_META_KEY,
     SUPPORTED_MODERN_PROTOCOL_VERSIONS
-} from '@modelcontextprotocol/core-internal';
+} from '@modelcontextprotocol/core-internal/client-runtime';
 
 import type { PriorDiscovery } from './probeClassifier';
 import type { CacheMode, CacheScope, ResponseCacheStore } from './responseCache';
@@ -103,7 +101,7 @@ import {
  */
 function serverInfoFromDiscover(discover: DiscoverResult): Implementation | undefined {
     const fromMeta = discover._meta?.[SERVER_INFO_META_KEY];
-    return isSpecType.Implementation(fromMeta) ? fromMeta : undefined;
+    return fromMeta as Implementation | undefined;
 }
 
 /**
@@ -371,15 +369,16 @@ export type ConnectOptions = RequestOptions & {
  * DiscoverResult-shaped members (a corrupt blob must never era-choose), or a
  * modern `discover` payload failing the wire path's schema.
  */
-function validatePrior(prior: PriorDiscovery): PriorDiscovery {
+async function validatePrior(prior: PriorDiscovery): Promise<PriorDiscovery> {
     if (typeof prior === 'object' && prior !== null) {
         if (prior.kind === 'legacy' && !('supportedVersions' in prior) && !('discover' in prior)) {
             return prior;
         }
         // Validation only: the blob is adopted verbatim, so unknown nested
         // members survive re-persistence via getDiscoverResult().
-        if (prior.kind === 'modern' && DiscoverResultSchema.safeParse(prior.discover).success) {
-            return prior;
+        if (prior.kind === 'modern') {
+            const { DiscoverResultSchema } = await import('@modelcontextprotocol/core/internal');
+            if (DiscoverResultSchema.safeParse(prior.discover).success) return prior;
         }
     }
     throw new SdkError(
@@ -984,7 +983,7 @@ export class Client extends Protocol<ClientContext> {
         // — treat it like an absent option, not a shape error.
         if (options?.prior != null) {
             // Cached era verdict: bypasses versionNegotiation resolution entirely.
-            return this._connectFromPrior(transport, validatePrior(options.prior), options);
+            return this._connectFromPrior(transport, await validatePrior(options.prior), options);
         }
         // The configured versionNegotiation mode decides the era.
         const negotiation = resolveVersionNegotiation(this._versionNegotiation, this._supportedProtocolVersionsOption);
@@ -1551,6 +1550,7 @@ export class Client extends Protocol<ClientContext> {
      * {@linkcode getDiscoverResult}.
      */
     async discover(options?: RequestOptions): Promise<DiscoverResult> {
+        const { DiscoverResultSchema } = await import('@modelcontextprotocol/core/internal');
         const result = await this._requestWithSchema({ method: 'server/discover' }, DiscoverResultSchema, options);
         this._discoverResult = result;
         return result;
@@ -1855,9 +1855,10 @@ export class Client extends Protocol<ClientContext> {
     /**
      * Resolve the SEP-2243 `x-mcp-header` declaration scan for a tool name.
      *
-     * The caller-supplied `toolDefinition` escape hatch wins; otherwise the
-     * cached `tools/list` entry (via the cache's `toolDefinition`) is the
-     * source. Freshness is the response cache's lifecycle: `list_changed`
+     * The caller supplies either its explicit `toolDefinition` or the
+     * descriptor already resolved with the cached output validator. Resolving
+     * both views together avoids a second backing-store lookup per tool call.
+     * Freshness is the response cache's lifecycle: `list_changed`
      * evicts, otherwise the held schema is the best information available
      * regardless of age, and a stale schema is recovered through the
      * `HEADER_MISMATCH` → evict-refetch-retry path in {@linkcode callTool}.
@@ -1865,8 +1866,7 @@ export class Client extends Protocol<ClientContext> {
      * "client SHOULD send without custom headers" guidance) and relies on the
      * same recovery.
      */
-    private async _resolveXMcpHeaderScan(name: string, override: Tool | undefined): Promise<XMcpHeaderScanResult | undefined> {
-        const tool = override ?? (await this._cache.toolDefinition(name));
+    private _resolveXMcpHeaderScan(tool: Tool | undefined): XMcpHeaderScanResult | undefined {
         return tool === undefined ? undefined : scanXMcpHeaderDeclarations(tool.inputSchema);
     }
 
@@ -2343,18 +2343,10 @@ export class Client extends Protocol<ClientContext> {
         // "client SHOULD send without custom headers" guidance) and without
         // output-schema validation (the v1.x opportunistic behaviour, kept so
         // a legacy/stdio `callTool` still issues zero extra requests).
-        const buildSendOptions = async (): Promise<CallToolRequestOptions | undefined> => {
+        let cachedTool: Tool | undefined;
+        const buildSendOptions = (): CallToolRequestOptions | undefined => {
             if (!mirroringActive) return options;
-            // A custom store's `get()` may reject (the documented store
-            // contract); route that to `onerror` and degrade to sending
-            // without `Mcp-Param-*` headers — same posture as a cold cache —
-            // rather than aborting the call before it reaches the wire.
-            let scan: XMcpHeaderScanResult | undefined;
-            try {
-                scan = await this._resolveXMcpHeaderScan(params.name, options?.toolDefinition);
-            } catch (error) {
-                this._reportStoreError(error);
-            }
+            const scan = this._resolveXMcpHeaderScan(options?.toolDefinition ?? cachedTool);
             if (!scan?.valid || scan.declarations.length === 0) return options;
             const paramHeaders = buildMcpParamHeaders(scan.declarations, params.arguments);
             return Object.keys(paramHeaders).length === 0 ? options : { ...options, headers: { ...options?.headers, ...paramHeaders } };
@@ -2368,12 +2360,18 @@ export class Client extends Protocol<ClientContext> {
         // derived views must agree — and is compiled in isolation (never written to the cache). The
         // cache read is guarded: a custom store whose `get()` rejects routes to `onerror` and
         // degrades to skipping validation (same outcome as a cold cache).
-        let compiled =
-            options?.toolDefinition === undefined
-                ? await this._cache
-                      .outputValidator(params.name, tool => this._compileOutputValidator(tool))
-                      .catch(error => void this._reportStoreError(error))
-                : this._compileOutputValidator(options.toolDefinition);
+        let compiled: OutputSchemaCompileResult | undefined;
+        if (options?.toolDefinition === undefined) {
+            try {
+                const runtime = await this._cache.toolRuntime(params.name, tool => this._compileOutputValidator(tool));
+                cachedTool = runtime.tool;
+                compiled = runtime.validator;
+            } catch (error) {
+                this._reportStoreError(error);
+            }
+        } else {
+            compiled = this._compileOutputValidator(options.toolDefinition);
+        }
         const assertCompiled = (): void => {
             if (compiled === undefined || compiled.ok) return;
             const err = compiled.compileError;
@@ -2387,7 +2385,7 @@ export class Client extends Protocol<ClientContext> {
         // map there is no wider union to narrow away.
         let result: CallToolResult;
         try {
-            result = await this.request({ method: 'tools/call', params }, await buildSendOptions());
+            result = await this.request({ method: 'tools/call', params }, buildSendOptions());
         } catch (error) {
             // SEP-2243 one-refresh-on-miss: a `HEADER_MISMATCH` rejection on a
             // modern connection means the server enforced an `Mcp-Param-*`
@@ -2424,11 +2422,17 @@ export class Client extends Protocol<ClientContext> {
             // outputSchema) or absent (cold cache on the first attempt). The recovery path is only
             // entered when `options.toolDefinition` is undefined, so the cache is the sole source.
             // Re-run the same fail-fast compile-error check before issuing the retry.
-            compiled = await this._cache
-                .outputValidator(params.name, tool => this._compileOutputValidator(tool))
-                .catch(error_ => void this._reportStoreError(error_));
+            try {
+                const runtime = await this._cache.toolRuntime(params.name, tool => this._compileOutputValidator(tool));
+                cachedTool = runtime.tool;
+                compiled = runtime.validator;
+            } catch (error_) {
+                this._reportStoreError(error_);
+                cachedTool = undefined;
+                compiled = undefined;
+            }
             assertCompiled();
-            result = await this.request({ method: 'tools/call', params }, await buildSendOptions());
+            result = await this.request({ method: 'tools/call', params }, buildSendOptions());
         }
 
         const validator = compiled !== undefined && compiled.ok ? compiled.validator : undefined;

@@ -1,4 +1,4 @@
-import type { ServerContext } from '@modelcontextprotocol/core-internal';
+import type { ServerContext } from '@modelcontextprotocol/core-internal/server-runtime';
 
 /**
  * Options for {@linkcode createRequestStateCodec}.

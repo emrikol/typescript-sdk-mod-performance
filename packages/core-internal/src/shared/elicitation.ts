@@ -1,8 +1,6 @@
-import { ProtocolErrorCode } from '../types/enums';
-import { ProtocolError } from '../types/errors';
 import {
     BooleanSchemaSchema,
-    ElicitRequestFormParamsSchema,
+    ElicitRequestedSchemaSchema,
     LegacyTitledEnumSchemaSchema,
     NumberSchemaSchema,
     PrimitiveSchemaDefinitionSchema,
@@ -11,7 +9,10 @@ import {
     TitledSingleSelectEnumSchemaSchema,
     UntitledMultiSelectEnumSchemaSchema,
     UntitledSingleSelectEnumSchemaSchema
-} from '../types/schemas';
+} from '@modelcontextprotocol/core/internal/elicitation';
+
+import { ProtocolErrorCode } from '../types/enums';
+import { ProtocolError } from '../types/errors';
 import type { ElicitRequestFormParams, StringSchema } from '../types/types';
 import { parseSchema, shapeKeys } from '../util/schema';
 import type { StandardSchemaWithJSON } from '../util/standardSchema';
@@ -55,7 +56,7 @@ function isAnnotationOnlyJsonSchemaKeyword(key: string): boolean {
 
 // The wire grammar, derived from the wire schemas so it tracks spec revisions. `$schema`
 // is spec-declared on the root but reaches the wire type via its catchall.
-const ROOT_KEYS = new Set(['$schema', ...Object.keys(ElicitRequestFormParamsSchema.shape.requestedSchema.shape)]);
+const ROOT_KEYS = new Set(['$schema', ...Object.keys(ElicitRequestedSchemaSchema.shape)]);
 
 const PROPERTY_KEYS_BY_TYPE: Record<string, ReadonlySet<string>> = {
     string: shapeKeys([
@@ -171,7 +172,7 @@ export function normalizeElicitInputParams(input: ElicitInputParams): ElicitRequ
     const pruned = walkRequestedSchema(convertStandardElicitationSchema(input.requestedSchema), vendor);
 
     // Scoped to the converted schema so params-level fields behave as on the raw branch.
-    const parsed = parseSchema(ElicitRequestFormParamsSchema.shape.requestedSchema, pruned);
+    const parsed = parseSchema(ElicitRequestedSchemaSchema, pruned);
     if (!parsed.success) {
         throw new ProtocolError(
             ProtocolErrorCode.InvalidParams,

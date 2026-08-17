@@ -3,7 +3,7 @@
  *
  * This file is selected via package.json export conditions when running in workerd.
  */
-import { preloadSchemas } from '@modelcontextprotocol/core-internal';
+import { preloadSchemas } from '@modelcontextprotocol/core-internal/server-runtime';
 
 export { CfWorkerJsonSchemaValidator as DefaultJsonSchemaValidator } from '@modelcontextprotocol/core-internal/validators/cfWorker';
 

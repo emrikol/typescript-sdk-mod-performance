@@ -1,5 +1,5 @@
-import type { AuthInfo } from '@modelcontextprotocol/core-internal';
-import { OAuthError, OAuthErrorCode } from '@modelcontextprotocol/core-internal';
+import type { AuthInfo } from '@modelcontextprotocol/core-internal/server-runtime';
+import { OAuthError, OAuthErrorCode } from '@modelcontextprotocol/core-internal/server-runtime';
 
 /**
  * Minimal token-verifier interface for MCP servers acting as an OAuth 2.0

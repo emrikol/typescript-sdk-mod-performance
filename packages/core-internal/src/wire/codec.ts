@@ -161,6 +161,7 @@ export interface WireCodec {
 
     /** Registry membership — the deletion story (inbound −32601 by absence; outbound typed local error). */
     hasRequestMethod(method: string): boolean;
+    hasResultMethod(method: string): boolean;
     hasNotificationMethod(method: string): boolean;
     hasInputRequestMethod(method: string): boolean;
 

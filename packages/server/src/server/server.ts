@@ -33,10 +33,8 @@ import type {
     ResourceUpdatedNotification,
     Result,
     ServerCapabilities,
-    ServerContext,
-    ToolResultContent,
-    ToolUseContent
-} from '@modelcontextprotocol/core-internal';
+    ServerContext
+} from '@modelcontextprotocol/core-internal/server-runtime';
 import {
     assertValidCacheHint,
     attachCacheHintFallback,
@@ -47,20 +45,18 @@ import {
     LATEST_PROTOCOL_VERSION,
     legacyProtocolVersions,
     LOG_LEVEL_META_KEY,
-    LoggingLevelSchema,
     mergeCapabilities,
     missingClientCapabilities,
     MissingRequiredClientCapabilityError,
     modernProtocolVersions,
     normalizeContentlessToolResult,
-    parseSchema,
     Protocol,
     ProtocolError,
     ProtocolErrorCode,
     SdkError,
     SdkErrorCode,
     withRequestStateValue
-} from '@modelcontextprotocol/core-internal';
+} from '@modelcontextprotocol/core-internal/server-runtime';
 import { DefaultJsonSchemaValidator } from '@modelcontextprotocol/server/_shims';
 
 import { coerceEmbeddedInputRequest, LegacyInputRequiredShim, resolveLegacyShimOptions } from './legacyInputRequiredShim';
@@ -363,10 +359,8 @@ export class Server extends Protocol<ServerContext> {
             const transportSessionId: string | undefined =
                 ctx.sessionId || (ctx.http?.req?.headers.get('mcp-session-id') as string) || undefined;
             const { level } = request.params;
-            const parseResult = parseSchema(LoggingLevelSchema, level);
-            if (parseResult.success) {
-                this._loggingLevels.set(transportSessionId, parseResult.data);
-            }
+            // Dispatch already validated the method-specific request schema.
+            this._loggingLevels.set(transportSessionId, level);
             return {};
         });
     }
@@ -432,7 +426,12 @@ export class Server extends Protocol<ServerContext> {
     private _loggingLevels = new Map<string | undefined, LoggingLevel>();
 
     // Map LogLevelSchema to severity index
-    private readonly LOG_LEVEL_SEVERITY = new Map(LoggingLevelSchema.options.map((level, index) => [level, index]));
+    private readonly LOG_LEVEL_SEVERITY = new Map<LoggingLevel, number>(
+        ['debug', 'info', 'notice', 'warning', 'error', 'critical', 'alert', 'emergency'].map((level, index) => [
+            level as LoggingLevel,
+            index
+        ])
+    );
 
     // Is a message with the given level ignored in the log level set for the given session id?
     private isMessageIgnored = (level: LoggingLevel, sessionId?: string): boolean => {
@@ -1085,7 +1084,17 @@ export class Server extends Protocol<ServerContext> {
         if (params.messages.length > 0) {
             const lastMessage = params.messages.at(-1)!;
             const lastContent = Array.isArray(lastMessage.content) ? lastMessage.content : [lastMessage.content];
-            const hasToolResults = lastContent.some(c => c.type === 'tool_result');
+            let hasToolResults = false;
+            let hasNonToolResults = false;
+            let toolResultIds: Set<string> | undefined;
+            for (const content of lastContent) {
+                if (content.type === 'tool_result') {
+                    hasToolResults = true;
+                    (toolResultIds ??= new Set()).add(content.toolUseId);
+                } else {
+                    hasNonToolResults = true;
+                }
+            }
 
             const previousMessage = params.messages.length > 1 ? params.messages.at(-2) : undefined;
             const previousContent = previousMessage
@@ -1093,10 +1102,16 @@ export class Server extends Protocol<ServerContext> {
                     ? previousMessage.content
                     : [previousMessage.content]
                 : [];
-            const hasPreviousToolUse = previousContent.some(c => c.type === 'tool_use');
+            let toolUseIds: Set<string> | undefined;
+            for (const content of previousContent) {
+                if (content.type === 'tool_use') {
+                    (toolUseIds ??= new Set()).add(content.id);
+                }
+            }
+            const hasPreviousToolUse = toolUseIds !== undefined;
 
             if (hasToolResults) {
-                if (lastContent.some(c => c.type !== 'tool_result')) {
+                if (hasNonToolResults) {
                     throw new ProtocolError(
                         ProtocolErrorCode.InvalidParams,
                         'The last message must contain only tool_result content if any is present'
@@ -1109,12 +1124,17 @@ export class Server extends Protocol<ServerContext> {
                     );
                 }
             }
-            if (hasPreviousToolUse) {
-                const toolUseIds = new Set(previousContent.filter(c => c.type === 'tool_use').map(c => (c as ToolUseContent).id));
-                const toolResultIds = new Set(
-                    lastContent.filter(c => c.type === 'tool_result').map(c => (c as ToolResultContent).toolUseId)
-                );
-                if (toolUseIds.size !== toolResultIds.size || ![...toolUseIds].every(id => toolResultIds.has(id))) {
+            if (toolUseIds !== undefined) {
+                let idsMatch = toolResultIds !== undefined && toolUseIds.size === toolResultIds.size;
+                if (idsMatch) {
+                    for (const id of toolUseIds) {
+                        if (!toolResultIds?.has(id)) {
+                            idsMatch = false;
+                            break;
+                        }
+                    }
+                }
+                if (!idsMatch) {
                     throw new ProtocolError(
                         ProtocolErrorCode.InvalidParams,
                         'ids of tool_result blocks and tool_use blocks from previous message do not match'

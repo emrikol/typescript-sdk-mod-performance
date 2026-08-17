@@ -47,7 +47,7 @@ import type {
     RequestId,
     Transport,
     TransportSendOptions
-} from '@modelcontextprotocol/core-internal';
+} from '@modelcontextprotocol/core-internal/server-runtime';
 import {
     isJSONRPCErrorResponse,
     isJSONRPCRequest,
@@ -56,7 +56,7 @@ import {
     ProtocolErrorCode,
     SdkError,
     SdkErrorCode
-} from '@modelcontextprotocol/core-internal';
+} from '@modelcontextprotocol/core-internal/server-runtime';
 
 import { armSseKeepAlive, DEFAULT_SSE_KEEP_ALIVE_MS } from './sseKeepAlive';
 

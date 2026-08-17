@@ -6,7 +6,6 @@ import {
     JSONRPCMessageSchema,
     JSONRPCNotificationSchema,
     JSONRPCRequestSchema,
-    JSONRPCResponseSchema,
     JSONRPCResultResponseSchema,
     TaskAugmentedRequestParamsSchema
 } from './schemas';
@@ -41,9 +40,15 @@ export function parseJSONRPCMessage(value: unknown): JSONRPCMessage {
     return JSONRPCMessageSchema.parse(value);
 }
 
-export const isJSONRPCRequest = (value: unknown): value is JSONRPCRequest => JSONRPCRequestSchema.safeParse(value).success;
+function isObjectWith(value: unknown, key: string): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value) && Object.hasOwn(value, key);
+}
 
-export const isJSONRPCNotification = (value: unknown): value is JSONRPCNotification => JSONRPCNotificationSchema.safeParse(value).success;
+export const isJSONRPCRequest = (value: unknown): value is JSONRPCRequest =>
+    isObjectWith(value, 'method') && Object.hasOwn(value, 'id') && JSONRPCRequestSchema.safeParse(value).success;
+
+export const isJSONRPCNotification = (value: unknown): value is JSONRPCNotification =>
+    isObjectWith(value, 'method') && !Object.hasOwn(value, 'id') && JSONRPCNotificationSchema.safeParse(value).success;
 
 /**
  * Checks if a value is a valid {@linkcode JSONRPCResultResponse}.
@@ -52,7 +57,7 @@ export const isJSONRPCNotification = (value: unknown): value is JSONRPCNotificat
  * @returns True if the value is a valid {@linkcode JSONRPCResultResponse}, false otherwise.
  */
 export const isJSONRPCResultResponse = (value: unknown): value is JSONRPCResultResponse =>
-    JSONRPCResultResponseSchema.safeParse(value).success;
+    isObjectWith(value, 'result') && JSONRPCResultResponseSchema.safeParse(value).success;
 
 /**
  * Checks if a value is a valid {@linkcode JSONRPCErrorResponse}.
@@ -61,7 +66,7 @@ export const isJSONRPCResultResponse = (value: unknown): value is JSONRPCResultR
  * @returns True if the value is a valid {@linkcode JSONRPCErrorResponse}, false otherwise.
  */
 export const isJSONRPCErrorResponse = (value: unknown): value is JSONRPCErrorResponse =>
-    JSONRPCErrorResponseSchema.safeParse(value).success;
+    isObjectWith(value, 'error') && JSONRPCErrorResponseSchema.safeParse(value).success;
 
 /**
  * Checks if a value is a valid {@linkcode JSONRPCResponse} (either a result or error response).
@@ -69,7 +74,8 @@ export const isJSONRPCErrorResponse = (value: unknown): value is JSONRPCErrorRes
  *
  * @returns True if the value is a valid {@linkcode JSONRPCResponse}, false otherwise.
  */
-export const isJSONRPCResponse = (value: unknown): value is JSONRPCResponse => JSONRPCResponseSchema.safeParse(value).success;
+export const isJSONRPCResponse = (value: unknown): value is JSONRPCResponse =>
+    isJSONRPCResultResponse(value) || isJSONRPCErrorResponse(value);
 
 /**
  * Checks if a value is a valid {@linkcode CallToolResult}.

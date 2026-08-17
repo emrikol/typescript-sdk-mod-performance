@@ -19,7 +19,7 @@
  * shrinking the budget passed to each leg — no new timer system.
  */
 import { SdkError, SdkErrorCode } from '../errors/sdkErrors';
-import { isInputRequiredResult } from '../types/guards';
+import { isInputRequiredResult } from '../types/assertions';
 import type { Progress } from '../types/types';
 
 /**

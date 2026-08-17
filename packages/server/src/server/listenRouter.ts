@@ -29,8 +29,13 @@ import type {
     RequestId,
     ServerCapabilities,
     SubscriptionFilter
-} from '@modelcontextprotocol/core-internal';
-import { codecForVersion, MODERN_WIRE_REVISION, SERVER_INFO_META_KEY, SUBSCRIPTION_ID_META_KEY } from '@modelcontextprotocol/core-internal';
+} from '@modelcontextprotocol/core-internal/server-runtime';
+import {
+    codecForVersion,
+    MODERN_WIRE_REVISION,
+    SERVER_INFO_META_KEY,
+    SUBSCRIPTION_ID_META_KEY
+} from '@modelcontextprotocol/core-internal/server-runtime';
 
 import type { ServerEventBus } from './serverEventBus';
 import { honoredSubset, listenFilterAccepts, serverEventToNotification } from './serverEventBus';

@@ -4,6 +4,7 @@ export default defineConfig({
     failOnWarn: 'ci-only',
     entry: [
         'src/index.ts',
+        'src/runtime.ts',
         'src/stdio.ts',
         'src/shimsNode.ts',
         'src/shimsWorkerd.ts',
@@ -27,6 +28,7 @@ export default defineConfig({
             paths: {
                 'fast-uri': ['../core-internal/src/validators/fastUriShim.d.ts'],
                 '@modelcontextprotocol/core-internal': ['../core-internal/src/index.ts'],
+                '@modelcontextprotocol/core-internal/server-runtime': ['../core-internal/src/exports/serverRuntime.ts'],
                 '@modelcontextprotocol/core-internal/public': ['../core-internal/src/exports/public/index.ts'],
                 '@modelcontextprotocol/core-internal/validators/ajv': ['../core-internal/src/validators/ajvProvider.ts'],
                 '@modelcontextprotocol/core-internal/validators/cfWorker': ['../core-internal/src/validators/cfWorkerProvider.ts']

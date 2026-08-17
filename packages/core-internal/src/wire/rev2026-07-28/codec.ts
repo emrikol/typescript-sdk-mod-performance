@@ -40,7 +40,8 @@ import {
     getRequestSchema2026,
     getResultSchema2026,
     hasNotificationMethod2026,
-    hasRequestMethod2026
+    hasRequestMethod2026,
+    hasResultMethod2026
 } from './registry';
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -109,6 +110,7 @@ export const rev2026Codec: WireCodec & {
     era: '2026-07-28',
 
     hasRequestMethod: hasRequestMethod2026,
+    hasResultMethod: hasResultMethod2026,
     hasNotificationMethod: hasNotificationMethod2026,
     hasInputRequestMethod: (method: string): boolean => getInputRequestSchema2026(method) !== undefined,
 

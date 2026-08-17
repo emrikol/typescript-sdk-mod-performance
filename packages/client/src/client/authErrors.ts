@@ -6,8 +6,34 @@
  * the failure mode without string-matching messages.
  */
 
-import type { OAuthClientMetadata } from '@modelcontextprotocol/core-internal';
-import { brandedHasInstance, stampErrorBrands } from '@modelcontextprotocol/core-internal';
+import type { OAuthClientMetadata } from '@modelcontextprotocol/core-internal/client-runtime';
+import { brandedHasInstance, stampErrorBrands } from '@modelcontextprotocol/core-internal/client-runtime';
+
+/** Thrown when a protected endpoint requires authorization. */
+export class UnauthorizedError extends Error {
+    static {
+        Object.defineProperty(this, 'mcpBrand', { value: 'mcp.UnauthorizedError' });
+    }
+
+    static override [Symbol.hasInstance](value: unknown): boolean {
+        return brandedHasInstance(this, value);
+    }
+
+    static isInstance<T extends abstract new (...args: never[]) => unknown>(this: T, value: unknown): value is InstanceType<T> {
+        if (typeof this !== 'function') {
+            throw new TypeError(
+                'isInstance must be called on the class (e.g. `UnauthorizedError.isInstance(value)`); for callbacks use `v => UnauthorizedError.isInstance(v)`'
+            );
+        }
+        return brandedHasInstance(this, value);
+    }
+
+    constructor(message?: string) {
+        super(message ?? 'Unauthorized');
+        this.name = 'UnauthorizedError';
+        stampErrorBrands(this, new.target);
+    }
+}
 
 /**
  * Base class for the OAuth-client-flow error family. Concrete subclasses are

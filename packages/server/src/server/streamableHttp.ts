@@ -7,17 +7,22 @@
  * For Node.js Express/HTTP compatibility, use {@linkcode @modelcontextprotocol/node!NodeStreamableHTTPServerTransport | NodeStreamableHTTPServerTransport} which wraps this transport.
  */
 
-import type { AuthInfo, JSONRPCMessage, MessageExtraInfo, RequestId, Transport } from '@modelcontextprotocol/core-internal';
+import type {
+    AuthInfo,
+    InitializeRequest,
+    JSONRPCMessage,
+    MessageExtraInfo,
+    RequestId,
+    Transport
+} from '@modelcontextprotocol/core-internal/server-runtime';
 import {
     DEFAULT_NEGOTIATED_PROTOCOL_VERSION,
-    isInitializeRequest,
     isJsonContentType,
     isJSONRPCErrorResponse,
     isJSONRPCRequest,
     isJSONRPCResultResponse,
-    JSONRPCMessageSchema,
     SUPPORTED_PROTOCOL_VERSIONS
-} from '@modelcontextprotocol/core-internal';
+} from '@modelcontextprotocol/core-internal/server-runtime';
 
 import { armSseKeepAlive, DEFAULT_SSE_KEEP_ALIVE_MS } from './sseKeepAlive';
 
@@ -243,6 +248,7 @@ export class WebStandardStreamableHTTPServerTransport implements Transport {
     private _closed: boolean = false;
     private _streamMapping: Map<string, StreamMapping> = new Map();
     private _requestToStreamMapping: Map<RequestId, string> = new Map();
+    private _streamToRequests: Map<string, Set<RequestId>> = new Map();
     private _requestResponseMap: Map<RequestId, JSONRPCMessage> = new Map();
     private _initialized: boolean = false;
     private _enableJsonResponse: boolean = false;
@@ -660,7 +666,7 @@ export class WebStandardStreamableHTTPServerTransport implements Transport {
             // unregister so a later reconnect isn't refused with 409. The
             // standalone GET stream is never request-scoped and stays open.
             if (replayedStreamId !== this._standaloneSseStreamId) {
-                const hasInFlightRequest = [...this._requestToStreamMapping.values()].includes(replayedStreamId);
+                const hasInFlightRequest = this._streamToRequests.has(replayedStreamId);
                 if (!hasInFlightRequest) {
                     this._streamMapping.delete(replayedStreamId);
                     try {
@@ -773,12 +779,19 @@ export class WebStandardStreamableHTTPServerTransport implements Transport {
             }
 
             let messages: JSONRPCMessage[];
+            let isInitializeRequest: (message: JSONRPCMessage) => message is JSONRPCMessage & InitializeRequest;
 
             // handle batch and single messages
             try {
+                // Session-style HTTP is the legacy compatibility path. Its
+                // complete schema catalog is loaded only when that transport
+                // receives a POST, not by every modern server at startup.
+                const { InitializeRequestSchema, JSONRPCMessageSchema } = await import('@modelcontextprotocol/core/internal');
                 messages = Array.isArray(rawMessage)
                     ? rawMessage.map(msg => JSONRPCMessageSchema.parse(msg))
                     : [JSONRPCMessageSchema.parse(rawMessage)];
+                isInitializeRequest = (message: JSONRPCMessage): message is JSONRPCMessage & InitializeRequest =>
+                    InitializeRequestSchema.safeParse(message).success;
             } catch (error) {
                 this.onerror?.(error as Error);
                 return this.createJsonErrorResponse(400, -32_700, 'Parse error: Invalid JSON-RPC message');
@@ -788,16 +801,8 @@ export class WebStandardStreamableHTTPServerTransport implements Transport {
                 return this.createJsonErrorResponse(404, -32_001, 'Session not found');
             }
 
-            // Check if this is an initialization request
-            // https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/lifecycle/
-            // The schema-validated guard (types/guards.ts → types/schemas.ts —
-            // NOT a wire/rev* import) gates a transport state mutation: a
-            // malformed `initialize` must NOT set `_initialized = true` before
-            // the protocol layer rejects it.
             const isInitializationRequest = messages.some(element => isInitializeRequest(element));
             if (isInitializationRequest) {
-                // If it's a server with session management and the session ID is already set we should reject the request
-                // to avoid re-initialization.
                 if (this._initialized && this.sessionId !== undefined) {
                     this.onerror?.(new Error('Invalid Request: Server already initialized'));
                     return this.createJsonErrorResponse(400, -32_600, 'Invalid Request: Server already initialized');
@@ -809,27 +814,18 @@ export class WebStandardStreamableHTTPServerTransport implements Transport {
                 this.sessionId = this.sessionIdGenerator?.();
                 this._initialized = true;
 
-                // If we have a session ID and an onsessioninitialized handler, call it immediately
-                // This is needed in cases where the server needs to keep track of multiple sessions
                 if (this.sessionId && this._onsessioninitialized) {
                     await Promise.resolve(this._onsessioninitialized(this.sessionId));
                 }
-            }
-            if (!isInitializationRequest) {
-                // If an Mcp-Session-Id is returned by the server during initialization,
-                // clients using the Streamable HTTP transport MUST include it
-                // in the Mcp-Session-Id header on all of their subsequent HTTP requests.
+            } else {
                 const sessionError = this.validateSession(req);
-                if (sessionError) {
-                    return sessionError;
-                }
-                // Mcp-Protocol-Version header is required for all requests after initialization.
+                if (sessionError) return sessionError;
                 const protocolError = this.validateProtocolVersion(req);
-                if (protocolError) {
-                    return protocolError;
-                }
+                if (protocolError) return protocolError;
             }
 
+            // Session initialization may await application work while a
+            // concurrent close tears down the transport.
             if (this._closed) {
                 return this.createJsonErrorResponse(404, -32_001, 'Session not found');
             }
@@ -869,7 +865,7 @@ export class WebStandardStreamableHTTPServerTransport implements Transport {
 
                     for (const message of messages) {
                         if (isJSONRPCRequest(message)) {
-                            this._requestToStreamMapping.set(message.id, streamId);
+                            this.trackRequest(message.id, streamId);
                         }
                     }
 
@@ -930,7 +926,7 @@ export class WebStandardStreamableHTTPServerTransport implements Transport {
                             }
                         }
                     });
-                    this._requestToStreamMapping.set(message.id, streamId);
+                    this.trackRequest(message.id, streamId);
                 }
             }
 
@@ -1062,6 +1058,8 @@ export class WebStandardStreamableHTTPServerTransport implements Transport {
 
         // Clear any pending responses
         this._requestResponseMap.clear();
+        this._requestToStreamMapping.clear();
+        this._streamToRequests.clear();
         this.onclose?.();
     }
 
@@ -1171,7 +1169,11 @@ export class WebStandardStreamableHTTPServerTransport implements Transport {
 
         if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
             this._requestResponseMap.set(requestId, message);
-            const relatedIds = [...this._requestToStreamMapping.entries()].filter(([_, sid]) => sid === streamId).map(([id]) => id);
+            const trackedRequests = this._streamToRequests.get(streamId);
+            if (trackedRequests === undefined) {
+                throw new Error(`No requests tracked for stream: ${streamId}`);
+            }
+            const relatedIds = [...trackedRequests];
 
             // Check if we have responses for all requests using this connection
             const allResponsesReady = relatedIds.every(id => this._requestResponseMap.has(id));
@@ -1194,20 +1196,14 @@ export class WebStandardStreamableHTTPServerTransport implements Transport {
                                 `Response for request ID ${String(requestId)} is undeliverable: per-request stream is disconnected and no eventStore is configured`
                             )
                         );
-                        for (const id of relatedIds) {
-                            this._requestResponseMap.delete(id);
-                            this._requestToStreamMapping.delete(id);
-                        }
+                        this.forgetRequests(streamId, trackedRequests);
                         return;
                     }
                     // SSE-mode with no live writer and an event store configured:
                     // the response was stored above for replay on Last-Event-ID
                     // reconnect. Return cleanly after running the bookkeeping
                     // cleanup so the request id is retired.
-                    for (const id of relatedIds) {
-                        this._requestResponseMap.delete(id);
-                        this._requestToStreamMapping.delete(id);
-                    }
+                    this.forgetRequests(streamId, trackedRequests);
                     return;
                 }
                 if (this._enableJsonResponse && stream.resolveJson) {
@@ -1232,11 +1228,26 @@ export class WebStandardStreamableHTTPServerTransport implements Transport {
                     stream.cleanup();
                 }
                 // Clean up
-                for (const id of relatedIds) {
-                    this._requestResponseMap.delete(id);
-                    this._requestToStreamMapping.delete(id);
-                }
+                this.forgetRequests(streamId, trackedRequests);
             }
         }
+    }
+
+    private trackRequest(requestId: RequestId, streamId: string): void {
+        this._requestToStreamMapping.set(requestId, streamId);
+        const requestIds = this._streamToRequests.get(streamId);
+        if (requestIds === undefined) {
+            this._streamToRequests.set(streamId, new Set([requestId]));
+        } else {
+            requestIds.add(requestId);
+        }
+    }
+
+    private forgetRequests(streamId: string, requestIds: Set<RequestId>): void {
+        for (const id of requestIds) {
+            this._requestResponseMap.delete(id);
+            this._requestToStreamMapping.delete(id);
+        }
+        this._streamToRequests.delete(streamId);
     }
 }

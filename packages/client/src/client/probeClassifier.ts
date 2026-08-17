@@ -13,7 +13,7 @@
  * negotiation phase only — an established modern connection is never silently
  * demoted to `initialize` by a later failure.
  */
-import type { DiscoverResult } from '@modelcontextprotocol/core-internal';
+import type { DiscoverResult } from '@modelcontextprotocol/core-internal/client-runtime';
 import {
     codecForVersion,
     MODERN_WIRE_REVISION,
@@ -22,7 +22,7 @@ import {
     SdkErrorCode,
     SdkHttpError,
     UnsupportedProtocolVersionError
-} from '@modelcontextprotocol/core-internal';
+} from '@modelcontextprotocol/core-internal/client-runtime';
 
 /**
  * The runtime environment the probe executed in. Only consulted for the

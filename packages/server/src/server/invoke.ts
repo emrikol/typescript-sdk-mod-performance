@@ -15,7 +15,12 @@
  * (and installing modern-only handlers) is the calling entry's responsibility
  * and happens before this seam runs; the seam itself never writes era state.
  */
-import type { AuthInfo, JSONRPCNotification, JSONRPCRequest, MessageClassification } from '@modelcontextprotocol/core-internal';
+import type {
+    AuthInfo,
+    JSONRPCNotification,
+    JSONRPCRequest,
+    MessageClassification
+} from '@modelcontextprotocol/core-internal/server-runtime';
 
 import type { McpServer } from './mcp';
 import type { PerRequestResponseMode } from './perRequestTransport';

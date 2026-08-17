@@ -23,4 +23,4 @@ export {
     SUPPORTED_PROTOCOL_VERSIONS,
     TRACEPARENT_META_KEY,
     TRACESTATE_META_KEY
-} from '@modelcontextprotocol/core/internal';
+} from '@modelcontextprotocol/core/internal/constants';

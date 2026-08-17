@@ -25,6 +25,14 @@
             "types": "./dist/index.d.ts",
             "import": "./dist/index.mjs"
         },
+        "./server-runtime": {
+            "types": "./src/exports/serverRuntime.ts",
+            "import": "./src/exports/serverRuntime.ts"
+        },
+        "./client-runtime": {
+            "types": "./src/exports/clientRuntime.ts",
+            "import": "./src/exports/clientRuntime.ts"
+        },
         "./types": {
             "types": "./src/exports/types/index.ts",
             "import": "./src/exports/types/index.ts"

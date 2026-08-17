@@ -1,4 +1,13 @@
 import { SdkError, SdkErrorCode } from '../errors/sdkErrors';
+import {
+    CLIENT_CAPABILITIES_META_KEY,
+    CLIENT_INFO_META_KEY,
+    LOG_LEVEL_META_KEY,
+    PROTOCOL_VERSION_META_KEY,
+    SUPPORTED_PROTOCOL_VERSIONS
+} from '../types/constants';
+import { ProtocolErrorCode } from '../types/enums';
+import { ProtocolError } from '../types/errors';
 import type {
     AuthInfo,
     CancelledNotification,
@@ -33,19 +42,7 @@ import type {
     ResultTypeMap,
     ServerCapabilities
 } from '../types/index';
-import {
-    CLIENT_CAPABILITIES_META_KEY,
-    CLIENT_INFO_META_KEY,
-    isJSONRPCErrorResponse,
-    isJSONRPCNotification,
-    isJSONRPCRequest,
-    isJSONRPCResultResponse,
-    LOG_LEVEL_META_KEY,
-    PROTOCOL_VERSION_META_KEY,
-    ProtocolError,
-    ProtocolErrorCode,
-    SUPPORTED_PROTOCOL_VERSIONS
-} from '../types/index';
+import { isJSONRPCResultResponseMessage as isJSONRPCResultResponse, jsonRPCMessageKind } from '../types/messageClassification';
 import type { StandardSchemaV1 } from '../util/standardSchema';
 import { isStandardSchema, validateStandardSchema } from '../util/standardSchema';
 import { bootstrapOutboundCodec } from '../wire/bootstrap';
@@ -189,6 +186,7 @@ const RESERVED_ENVELOPE_META_KEYS: readonly string[] = [
     CLIENT_CAPABILITIES_META_KEY,
     LOG_LEVEL_META_KEY
 ];
+const RESERVED_ENVELOPE_META_KEY_SET = new Set(RESERVED_ENVELOPE_META_KEYS);
 
 /**
  * Top-level params members carrying multi-round-trip driver material
@@ -196,8 +194,6 @@ const RESERVED_ENVELOPE_META_KEYS: readonly string[] = [
  * client-initiated REQUESTS only — notification params keep them untouched
  * (a vendor notification may legitimately use the same names).
  */
-const RETRY_PARAMS_KEYS = ['inputResponses', 'requestState'] as const;
-
 /**
  * Lift wire-only material out of an inbound message so handlers see exactly
  * the 2025-era shape, and surface it for the protocol layer (requests: via
@@ -216,35 +212,49 @@ function liftWireOnlyMaterial<T extends JSONRPCRequest | JSONRPCNotification>(
     if (!isPlainObject(params)) return { message, lifted: {} };
 
     const meta = params._meta;
-    const envelopeKeys = isPlainObject(meta) ? RESERVED_ENVELOPE_META_KEYS.filter(key => key in meta) : [];
-    const retryKeys = kind === 'request' ? RETRY_PARAMS_KEYS.filter(key => key in params) : [];
-    if (envelopeKeys.length === 0 && retryKeys.length === 0) return { message, lifted: {} };
+    const hasEnvelope = isPlainObject(meta) && RESERVED_ENVELOPE_META_KEYS.some(key => key in meta);
+    const hasInputResponses = kind === 'request' && 'inputResponses' in params;
+    const hasRequestState = kind === 'request' && 'requestState' in params;
+    if (!hasEnvelope && !hasInputResponses && !hasRequestState) return { message, lifted: {} };
 
     const lifted: LiftedWireMaterial = {};
     const nextParams: Record<string, unknown> = { ...params };
 
-    if (envelopeKeys.length > 0 && isPlainObject(meta)) {
+    if (hasEnvelope && isPlainObject(meta)) {
         const envelope: Record<string, unknown> = {};
-        const nextMeta: Record<string, unknown> = { ...meta };
-        for (const key of envelopeKeys) {
-            envelope[key] = meta[key];
-            delete nextMeta[key];
+        const nextMeta: Record<string, unknown> = {};
+        let hasNextMeta = false;
+        for (const [key, value] of Object.entries(meta)) {
+            if (RESERVED_ENVELOPE_META_KEY_SET.has(key)) {
+                envelope[key] = value;
+            } else {
+                nextMeta[key] = value;
+                hasNextMeta = true;
+            }
+        }
+        // Preserve the previous `in` semantics for unusual objects carrying a
+        // reserved key on their prototype. Parsed JSON takes the fast own-key
+        // path above.
+        for (const key of RESERVED_ENVELOPE_META_KEYS) {
+            if (!(key in envelope) && key in meta) envelope[key] = meta[key];
         }
         // Surfaced as received; validation/enforcement is the dispatch-time
         // classifier's job, not the lift's.
         lifted.envelope = envelope as Partial<RequestMetaEnvelope>;
-        if (Object.keys(nextMeta).length > 0) {
+        if (hasNextMeta) {
             nextParams._meta = nextMeta;
         } else {
             delete nextParams._meta;
         }
     }
 
-    for (const key of retryKeys) {
-        // Driver material reaches the protocol layer un-deleted, verbatim.
-        if (key === 'inputResponses') lifted.inputResponses = nextParams[key] as Record<string, unknown>;
-        if (key === 'requestState') lifted.requestState = nextParams[key] as string;
-        delete nextParams[key];
+    if (hasInputResponses) {
+        lifted.inputResponses = nextParams.inputResponses as Record<string, unknown>;
+        delete nextParams.inputResponses;
+    }
+    if (hasRequestState) {
+        lifted.requestState = nextParams.requestState as string;
+        delete nextParams.requestState;
     }
 
     return { message: { ...message, params: nextParams } as T, lifted };
@@ -264,13 +274,10 @@ function liftWireOnlyMaterial<T extends JSONRPCRequest | JSONRPCNotification>(
  * `tasks/*` methods, so the spec-method overload refuses them up front).
  */
 function codecResultValidator(codec: WireCodec, method: string): StandardSchemaV1 | undefined {
-    // Probe for result-registry membership through the function-only
-    // contract: a `not-in-era` outcome means no result entry for this method
-    // (the probe value is irrelevant — every spec result schema rejects
-    // `undefined`, so a method with an entry returns `invalid`, never
-    // `not-in-era`).
-    const probe = codec.validateResult(method, undefined);
-    if (!probe.ok && probe.reason === 'not-in-era') return undefined;
+    // Membership is metadata, not validation. Asking the validator this
+    // question used to construct and discard a full Zod error on every
+    // request because valid result schemas reject `undefined`.
+    if (!codec.hasResultMethod(method)) return undefined;
     return {
         '~standard': {
             version: 1,
@@ -802,14 +809,23 @@ export abstract class Protocol<ContextT extends BaseContext> {
         const _onmessage = this._transport?.onmessage;
         this._transport.onmessage = (message, extra) => {
             _onmessage?.(message, extra);
-            if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
-                this._onresponse(message);
-            } else if (isJSONRPCRequest(message)) {
-                this._onrequest(message, extra);
-            } else if (isJSONRPCNotification(message)) {
-                this._onnotification(message, extra);
-            } else {
-                this._onerror(new Error(`Unknown message type: ${JSON.stringify(message)}`));
+            switch (jsonRPCMessageKind(message)) {
+                case 'result':
+                case 'error': {
+                    this._onresponse(message as JSONRPCResultResponse | JSONRPCErrorResponse);
+                    break;
+                }
+                case 'request': {
+                    this._onrequest(message as JSONRPCRequest, extra);
+                    break;
+                }
+                case 'notification': {
+                    this._onnotification(message as JSONRPCNotification, extra);
+                    break;
+                }
+                default: {
+                    this._onerror(new Error(`Unknown message type: ${JSON.stringify(message)}`));
+                }
             }
         };
 
@@ -838,19 +854,22 @@ export abstract class Protocol<ContextT extends BaseContext> {
         const requestHandlerAbortControllers = this._requestHandlerAbortControllers;
         this._requestHandlerAbortControllers = new Map();
 
-        const error = new SdkError(SdkErrorCode.ConnectionClosed, 'Connection closed');
+        const hasPendingWork = responseHandlers.size > 0 || requestHandlerAbortControllers.size > 0;
+        const error = hasPendingWork ? new SdkError(SdkErrorCode.ConnectionClosed, 'Connection closed') : undefined;
 
         this._transport = undefined;
 
         try {
             this.onclose?.();
         } finally {
-            for (const handler of responseHandlers.values()) {
-                handler(error);
-            }
+            if (error !== undefined) {
+                for (const handler of responseHandlers.values()) {
+                    handler(error);
+                }
 
-            for (const controller of requestHandlerAbortControllers.values()) {
-                controller.abort(error);
+                for (const controller of requestHandlerAbortControllers.values()) {
+                    controller.abort(error);
+                }
             }
         }
     }
@@ -1043,6 +1062,11 @@ export abstract class Protocol<ContextT extends BaseContext> {
 
         const abortController = new AbortController();
         this._requestHandlerAbortControllers.set(request.id, abortController);
+        const releaseRequest = () => {
+            if (this._requestHandlerAbortControllers.get(request.id) === abortController) {
+                this._requestHandlerAbortControllers.delete(request.id);
+            }
+        };
 
         // Multi-round-trip retry material: only BARE response objects are
         // surfaced to the handler; entries that look like a wrapped
@@ -1119,6 +1143,7 @@ export abstract class Protocol<ContextT extends BaseContext> {
                         encoded = codec.encodeResult(request.method, result, this._outboundServerInfo());
                     } catch (error) {
                         this._onerror(new Error(`Failed to encode result for ${request.method}: ${error}`));
+                        releaseRequest();
                         sendErrorResponse(ProtocolErrorCode.InternalError, 'Internal error');
                         return;
                     }
@@ -1128,6 +1153,12 @@ export abstract class Protocol<ContextT extends BaseContext> {
                         jsonrpc: '2.0',
                         id: request.id
                     };
+                    // The handler is complete before transport.send(). A
+                    // per-request transport may close synchronously while
+                    // sending its terminal response; release the controller
+                    // first so normal completion is not treated as in-flight
+                    // cancellation during that close.
+                    releaseRequest();
                     await capturedTransport?.send(response);
                 },
                 async error => {
@@ -1150,15 +1181,12 @@ export abstract class Protocol<ContextT extends BaseContext> {
                             ...(error['data'] !== undefined && { data: error['data'] })
                         }
                     };
+                    releaseRequest();
                     await capturedTransport?.send(errorResponse);
                 }
             )
             .catch(error => this._onerror(new Error(`Failed to send response: ${error}`)))
-            .finally(() => {
-                if (this._requestHandlerAbortControllers.get(request.id) === abortController) {
-                    this._requestHandlerAbortControllers.delete(request.id);
-                }
-            });
+            .finally(releaseRequest);
     }
 
     private _onprogress(notification: ProgressNotification): void {

@@ -77,7 +77,7 @@ export function hasNotificationMethod2026(method: string): method is Rev2026Noti
 }
 
 /** Result-map membership (same key set as the request map on this era). */
-function hasResultMethod2026(method: string): method is Rev2026RequestMethod {
+export function hasResultMethod2026(method: string): method is Rev2026RequestMethod {
     return Object.prototype.hasOwnProperty.call(requestMethodKeys, method);
 }
 

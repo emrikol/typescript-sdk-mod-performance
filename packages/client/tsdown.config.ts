@@ -4,6 +4,7 @@ export default defineConfig({
     failOnWarn: 'ci-only',
     entry: [
         'src/index.ts',
+        'src/runtime.ts',
         'src/stdio.ts',
         'src/shimsNode.ts',
         'src/shimsWorkerd.ts',
@@ -27,6 +28,7 @@ export default defineConfig({
             paths: {
                 'fast-uri': ['../core-internal/src/validators/fastUriShim.d.ts'],
                 '@modelcontextprotocol/core-internal': ['../core-internal/src/index.ts'],
+                '@modelcontextprotocol/core-internal/client-runtime': ['../core-internal/src/exports/clientRuntime.ts'],
                 '@modelcontextprotocol/core-internal/public': ['../core-internal/src/exports/public/index.ts'],
                 '@modelcontextprotocol/core-internal/validators/ajv': ['../core-internal/src/validators/ajvProvider.ts'],
                 '@modelcontextprotocol/core-internal/validators/cfWorker': ['../core-internal/src/validators/cfWorkerProvider.ts']
@@ -37,5 +39,9 @@ export default defineConfig({
     // The schema modules live in @modelcontextprotocol/core (a real runtime dependency); the
     // bundled core-internal shims import them via the './internal' subpath, which must stay an
     // external import (explicit entry — the tsconfig paths alias would otherwise inline it).
-    external: ['@modelcontextprotocol/client/_shims', '@modelcontextprotocol/core/internal']
+    external: [
+        '@modelcontextprotocol/client/_shims',
+        '@modelcontextprotocol/core/internal',
+        '@modelcontextprotocol/core/internal/list-changed'
+    ]
 });

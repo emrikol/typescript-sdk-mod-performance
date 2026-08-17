@@ -11,7 +11,13 @@
  * after a modern resolution; while the probe window is open, inbound messages
  * that are not the probe response are dropped with zero bytes written back.
  */
-import type { ClientCapabilities, DiscoverResult, Implementation, JSONRPCRequest, Transport } from '@modelcontextprotocol/core-internal';
+import type {
+    ClientCapabilities,
+    DiscoverResult,
+    Implementation,
+    JSONRPCRequest,
+    Transport
+} from '@modelcontextprotocol/core-internal/client-runtime';
 import {
     codecForVersion,
     isJSONRPCErrorResponse,
@@ -23,9 +29,9 @@ import {
     SdkErrorCode,
     SdkHttpError,
     SUPPORTED_MODERN_PROTOCOL_VERSIONS
-} from '@modelcontextprotocol/core-internal';
+} from '@modelcontextprotocol/core-internal/client-runtime';
 
-import { UnauthorizedError } from './auth';
+import { UnauthorizedError } from './authErrors';
 import { isAuthSeamEscape } from './authSeam';
 import type { ProbeEnvironment, ProbeOutcome, ProbeTransportKind, ProbeVerdict } from './probeClassifier';
 import { classifyProbeOutcome } from './probeClassifier';

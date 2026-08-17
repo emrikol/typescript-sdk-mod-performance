@@ -1,4 +1,4 @@
-import type { ListToolsResult, Tool } from '@modelcontextprotocol/core-internal';
+import type { ListToolsResult, Tool } from '@modelcontextprotocol/core-internal/client-runtime';
 
 /**
  * Client-side response cache for SEP-2549 (`CacheableResult`) freshness hints.
@@ -154,15 +154,15 @@ const CAP_EXEMPT_METHODS: ReadonlySet<string> = new Set([
  * see {@linkcode InMemoryResponseCacheStoreOptions.maxEntries}) on the
  * `resources/read` keyspace so an unbounded stream of distinct URIs cannot
  * grow it without limit; the list-singleton methods are exempt and never
- * evicted by the cap. `Map` preserves insertion order, so the oldest live
- * capped key is the first matching iteration entry.
+ * evicted by the cap. A separate insertion-ordered set indexes only capped
+ * keys, so eviction does not scan exempt entries from shared-store tenants.
  */
 export class InMemoryResponseCacheStore implements ResponseCacheStore {
     private readonly _entries = new Map<string, CacheEntry>();
+    /** Insertion-ordered keys subject to the cap; avoids scanning exempt entries during eviction. */
+    private readonly _cappedKeys = new Set<string>();
     private readonly _maxEntries: number;
     private _stamp = 0;
-    /** Count of held entries that are subject to the cap (i.e. not in {@linkcode CAP_EXEMPT_METHODS}). */
-    private _cappedSize = 0;
 
     constructor(options?: InMemoryResponseCacheStoreOptions) {
         this._maxEntries = options?.maxEntries ?? 512;
@@ -183,25 +183,25 @@ export class InMemoryResponseCacheStore implements ResponseCacheStore {
         const isNew = !this._entries.has(k);
         // Evict the oldest CAPPED entry first when adding a NEW capped key
         // would exceed the cap (re-set of an existing key never evicts; an
-        // exempt-method write never evicts). `Map` iteration order is
-        // insertion order, so the first non-exempt key is the oldest one.
-        if (!exempt && isNew && this._maxEntries > 0 && this._cappedSize >= this._maxEntries) {
-            for (const oldKey of this._entries.keys()) {
-                if (!CAP_EXEMPT_METHODS.has(oldKey.slice(0, oldKey.indexOf('\0')))) {
-                    this._entries.delete(oldKey);
-                    this._cappedSize--;
-                    break;
-                }
+        // exempt-method write never evicts). The capped-key index yields the
+        // oldest entry directly.
+        if (!exempt && isNew && this._maxEntries > 0 && this._cappedKeys.size >= this._maxEntries) {
+            const oldest = this._cappedKeys.values().next().value;
+            if (oldest !== undefined) {
+                this._entries.delete(oldest);
+                this._cappedKeys.delete(oldest);
             }
         }
         const stamp = ++this._stamp;
         this._entries.set(k, { ...entry, stamp });
-        if (isNew && !exempt) this._cappedSize++;
+        if (isNew && !exempt) this._cappedKeys.add(k);
         return stamp;
     }
 
     delete(key: CacheKey): void {
-        if (this._entries.delete(keyOf(key)) && !CAP_EXEMPT_METHODS.has(key.method)) this._cappedSize--;
+        const k = keyOf(key);
+        this._entries.delete(k);
+        this._cappedKeys.delete(k);
     }
 
     evict(method: string): void {
@@ -210,14 +210,14 @@ export class InMemoryResponseCacheStore implements ResponseCacheStore {
         for (const k of this._entries.keys()) {
             if (k.startsWith(prefix)) {
                 this._entries.delete(k);
-                if (!exempt) this._cappedSize--;
+                if (!exempt) this._cappedKeys.delete(k);
             }
         }
     }
 
     clear(): void {
         this._entries.clear();
-        this._cappedSize = 0;
+        this._cappedKeys.clear();
     }
 }
 
@@ -225,14 +225,13 @@ export class InMemoryResponseCacheStore implements ResponseCacheStore {
  * Serialize a {@linkcode CacheKey} for the in-memory map. `method` is always
  * an SDK-set MCP method string (never contains a NUL), so the `\0` prefix
  * delimiter is safe and lets {@linkcode InMemoryResponseCacheStore.evict} do a
- * cheap prefix scan. `partition` (already a JSON-encoded
- * `[serverIdentity, principal]` pair) and `params` (a resource URI on the
- * `resources/read` path — caller-controlled) are JSON-array-encoded together,
- * which is collision-free regardless of any NUL or delimiter characters they
- * carry.
+ * cheap prefix scan. `partition` is already a collision-free JSON encoding;
+ * its character length separates it from caller-controlled `params` without
+ * allocating and stringifying another temporary array on every cache probe.
  */
 function keyOf(key: CacheKey): string {
-    return `${key.method}\0${JSON.stringify([key.partition ?? '', key.params ?? ''])}`;
+    const partition = key.partition ?? '';
+    return `${key.method}\0${partition.length}:${partition}${key.params ?? ''}`;
 }
 
 /**
@@ -251,6 +250,7 @@ function genKey(method: string, params?: string): string {
  * indefinitely.
  */
 export const MAX_CACHE_TTL_MS = 86_400_000;
+const NO_OUTPUT_VALIDATOR = Symbol('no-output-validator');
 
 /**
  * The `Client`'s cache-coordination collaborator.
@@ -291,11 +291,9 @@ export class ClientResponseCache {
      */
     private _toolIndex?: { stamp: number; byName: Map<string, Tool> };
     /**
-     * `name → compiled output-schema validator` derived from the cached
-     * `tools/list` entry; same stamp-keyed memoization as `_toolIndex`. Typed
-     * `unknown` so this class stays free of any validator-provider dependency
-     * — the compile callback supplied to {@linkcode outputValidator} owns the
-     * concrete type.
+     * Lazily compiled output validators keyed by tool name. The stamp matches
+     * `_toolIndex`, so one cached list is decoded once and only requested
+     * tools pay compilation cost.
      */
     private _toolOutputValidatorIndex?: { stamp: number; byName: Map<string, unknown> };
     /**
@@ -303,11 +301,13 @@ export class ClientResponseCache {
      * transport's `sessionId`, or a client-generated per-connection
      * surrogate). Set by the `Client` immediately after a successful connect;
      * `''` is the pre-connect sentinel. Every storage partition is derived
-     * from this (see `_partitionFor`), so two clients sharing one store but
+     * from this, so two clients sharing one store but
      * connected to different servers never collide on `tools/list` and a
      * server cannot read another server's `'public'` entries.
      */
-    private _serverIdentity = '';
+    /** Pre-encoded storage partitions; identity and principal change only at connection boundaries. */
+    private _privatePartition: string;
+    private _publicPartition: string;
 
     constructor(
         private readonly _store: ResponseCacheStore,
@@ -329,7 +329,7 @@ export class ClientResponseCache {
          * `private`-scope storage slot within the connected server's
          * namespace). `''` (the default) makes the `private` slot identical to
          * the server's shared `public` slot — the safe single-tenant posture.
-         * See `_partitionFor`.
+         * This is encoded into the private partition at connection time.
          */
         private readonly _cachePartition: string = '',
         /**
@@ -338,7 +338,10 @@ export class ClientResponseCache {
          * {@linkcode now}. Default `Date.now`.
          */
         private readonly _now: () => number = Date.now
-    ) {}
+    ) {
+        this._privatePartition = JSON.stringify(['', this._cachePartition]);
+        this._publicPartition = JSON.stringify(['', '']);
+    }
 
     /** The clock used for every freshness computation and check. */
     now(): number {
@@ -358,22 +361,8 @@ export class ClientResponseCache {
      * `''` sentinel are no longer reachable.
      */
     setServerIdentity(identity: string): void {
-        this._serverIdentity = identity;
-    }
-
-    /**
-     * Derive the storage partition for `scope`. The encoding is
-     * `JSON.stringify([serverIdentity, principal])` — JSON escaping makes it
-     * collision-free by construction: a malicious server cannot craft a
-     * `serverInfo.name`/`version` whose concatenated form bleeds into another
-     * server's namespace or another principal's slot, regardless of `@` / `|`
-     * / `"` / NUL in the server-controlled strings. `'public'` →
-     * `[serverIdentity, '']` (shared within this server); `'private'` →
-     * `[serverIdentity, cachePartition]`. When `cachePartition` is `''` the
-     * two coincide.
-     */
-    private _partitionFor(scope: CacheScope): string {
-        return JSON.stringify([this._serverIdentity, scope === 'public' ? '' : this._cachePartition]);
+        this._privatePartition = JSON.stringify([identity, this._cachePartition]);
+        this._publicPartition = JSON.stringify([identity, '']);
     }
 
     /**
@@ -389,10 +378,10 @@ export class ClientResponseCache {
      */
     private async _probe(method: string, params?: string): Promise<CacheEntry | undefined> {
         const key = { method, params: params ?? '' };
-        const ownPartition = this._partitionFor('private');
+        const ownPartition = this._privatePartition;
         const own = await this._store.get({ ...key, partition: ownPartition });
         if (own !== undefined) return own;
-        const sharedPartition = this._partitionFor('public');
+        const sharedPartition = this._publicPartition;
         if (sharedPartition === ownPartition) return undefined;
         const shared = await this._store.get({ ...key, partition: sharedPartition });
         return shared?.scope === 'public' ? shared : undefined;
@@ -425,8 +414,8 @@ export class ClientResponseCache {
      * reported and does not skip the other, and the call always resolves.
      */
     private async _deleteBoth(method: string, params: string): Promise<void> {
-        const ownPartition = this._partitionFor('private');
-        const sharedPartition = this._partitionFor('public');
+        const ownPartition = this._privatePartition;
+        const sharedPartition = this._publicPartition;
         try {
             await this._store.delete({ method, params, partition: ownPartition });
         } catch (error) {
@@ -501,7 +490,7 @@ export class ClientResponseCache {
      *
      * `freshness` carries the client-computed `expiresAt` (absolute ms epoch,
      * `now + ttlMs`) and the server-reported `cacheScope`. The storage
-     * `partition` is derived from the scope via `_partitionFor`:
+     * `partition` is selected from the pre-encoded scope partitions:
      * `'public'` → `[serverIdentity, '']` (shared within this server);
      * `'private'` → `[serverIdentity, cachePartition]` (so a shared store
      * never serves a private entry to another identity). Absent `freshness`
@@ -527,8 +516,8 @@ export class ClientResponseCache {
     ): Promise<void> {
         if ((this._evictionGeneration.get(genKey(method, freshness?.params)) ?? 0) !== capturedGen) return;
         const params = freshness?.params ?? '';
-        const ownPartition = this._partitionFor('private');
-        const sharedPartition = this._partitionFor('public');
+        const ownPartition = this._privatePartition;
+        const sharedPartition = this._publicPartition;
         const partition = (freshness?.scope ?? 'private') === 'public' ? sharedPartition : ownPartition;
         try {
             await this._store.set(
@@ -595,7 +584,7 @@ export class ClientResponseCache {
         this._evictionGeneration.clear();
         this._toolIndex = undefined;
         this._toolOutputValidatorIndex = undefined;
-        this._serverIdentity = '';
+        this.setServerIdentity('');
     }
 
     /**
@@ -610,6 +599,11 @@ export class ClientResponseCache {
      */
     async toolDefinition(name: string): Promise<Tool | undefined> {
         const entry = await this._probe('tools/list');
+        return this._indexedTool(entry, name);
+    }
+
+    /** Update the stamp-bound tool index from one already-fetched entry. */
+    private _indexedTool(entry: CacheEntry | undefined, name: string): Tool | undefined {
         if (entry === undefined) {
             this._toolIndex = undefined;
             return undefined;
@@ -630,8 +624,8 @@ export class ClientResponseCache {
      * The compiled output-schema validator for tool `name`, derived from the
      * cached `tools/list` entry — same source and same stamp-keyed
      * memoization as {@linkcode toolDefinition}. The `name → validator` index
-     * re-derives only when the backing entry's stamp changes (a refetched
-     * `tools/list` recompiles; a `list_changed` eviction drops it). Returns
+     * compiles each requested tool at most once and resets when the backing
+     * entry's stamp changes. Returns
      * `undefined` when no `tools/list` is held, the tool is absent, or it has
      * no `outputSchema`.
      *
@@ -639,31 +633,38 @@ export class ClientResponseCache {
      * `Client` passes its `_jsonSchemaValidator` wrapper) so this
      * class carries no validator-provider dependency. One tool's uncompilable
      * `outputSchema` (e.g. an invalid `pattern` regex or unresolvable `$ref`)
-     * must not poison every other tool's `callTool` — the callback isolates
-     * that compile error per tool by returning a per-tool error variant which
-     * the index stores alongside the good ones, and `callTool` surfaces it as
+     * must not poison every other tool's `callTool` — only the requested tool
+     * is compiled, and `callTool` surfaces its per-tool error variant as
      * a typed `InvalidParams` only for that name. Because the error is held on
      * this stamp-keyed substrate (not a parallel map), it inherits the
      * substrate's invalidation lifecycle: a `list_changed` eviction drops it,
-     * a refetched `tools/list` re-derives it, and `resetForReconnect` clears
+     * a refetched `tools/list` re-derives it lazily, and `resetForReconnect` clears
      * the lot.
      */
-    async outputValidator<V>(name: string, compile: (tool: Tool) => V | undefined): Promise<V | undefined> {
-        const entry = await this._probe('tools/list');
-        if (entry === undefined) {
+    async toolRuntime<V>(name: string, compile: (tool: Tool) => V | undefined): Promise<{ tool?: Tool; validator?: V }> {
+        // Fetch the backing entry here instead of awaiting toolDefinition():
+        // callTool needs both descriptor and validator, and an extra async
+        // layer on every response would add a needless microtask hop.
+        const tool = this._indexedTool(await this._probe('tools/list'), name);
+        const stamp = this._toolIndex?.stamp;
+        if (tool === undefined || stamp === undefined) {
             this._toolOutputValidatorIndex = undefined;
-            return undefined;
+            return {};
         }
-        if (this._toolOutputValidatorIndex?.stamp !== entry.stamp) {
-            const list = this._decodeListTools(entry) ?? { tools: [] };
-            const byName = new Map<string, unknown>();
-            for (const tool of list.tools) {
-                const compiled = compile(tool);
-                if (compiled !== undefined) byName.set(tool.name, compiled);
-            }
-            this._toolOutputValidatorIndex = { stamp: entry.stamp, byName };
+        if (this._toolOutputValidatorIndex?.stamp !== stamp) {
+            this._toolOutputValidatorIndex = { stamp, byName: new Map() };
         }
-        return this._toolOutputValidatorIndex.byName.get(name) as V | undefined;
+        if (!this._toolOutputValidatorIndex.byName.has(name)) {
+            this._toolOutputValidatorIndex.byName.set(name, compile(tool) ?? NO_OUTPUT_VALIDATOR);
+        }
+        const validator = this._toolOutputValidatorIndex.byName.get(name);
+        return validator === NO_OUTPUT_VALIDATOR ? { tool } : { tool, validator: validator as V };
+    }
+
+    /** Return only the compiled validator when the caller does not need the tool descriptor. */
+    async outputValidator<V>(name: string, compile: (tool: Tool) => V | undefined): Promise<V | undefined> {
+        const runtime = await this.toolRuntime(name, compile);
+        return runtime.validator;
     }
 
     /** Parse a held `tools/list` document for the index builders; a document

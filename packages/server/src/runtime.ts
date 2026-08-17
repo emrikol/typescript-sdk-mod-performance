@@ -106,4 +106,6 @@ export { acceptedContent, inputRequired, inputResponse } from '@modelcontextprot
 export { preloadSchemas } from '@modelcontextprotocol/core-internal/server-runtime';
 
 // re-export curated public API from core
-export * from '@modelcontextprotocol/core-internal/public';
+// The runtime entry exports the full neutral type surface without constructing
+// the optional protocol schema catalog at module evaluation time.
+export type * from '@modelcontextprotocol/core-internal/public';

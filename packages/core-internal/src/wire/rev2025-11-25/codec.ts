@@ -33,7 +33,14 @@ import type { DecodedResult, EnvelopeIssue, LiftedWireMaterial, OutboundEnvelope
 import { appendTextFallbackForNonObject } from '../textFallback';
 import { buildSchemas2025 } from './buildSchemas';
 import { isNonObjectJsonSchemaRoot, wrapOutputSchemaForLegacy } from './legacyWrap';
-import { getNotificationSchema, getRequestSchema, getResultSchema, hasNotificationMethod2025, hasRequestMethod2025 } from './registry';
+import {
+    getNotificationSchema,
+    getRequestSchema,
+    getResultSchema,
+    hasNotificationMethod2025,
+    hasRequestMethod2025,
+    hasResultMethod2025
+} from './registry';
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -62,6 +69,7 @@ export const rev2025Codec: WireCodec = {
     era: '2025-11-25',
 
     hasRequestMethod: hasRequestMethod2025,
+    hasResultMethod: hasResultMethod2025,
     hasNotificationMethod: hasNotificationMethod2025,
 
     // ── Function-only validation surface ──

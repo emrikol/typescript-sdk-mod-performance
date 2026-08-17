@@ -11,6 +11,7 @@ import type {
     InputRequiredResult,
     ListPromptsResult,
     ListResourcesResult,
+    ListResourceTemplatesResult,
     ListToolsResult,
     LoggingMessageNotification,
     Prompt,
@@ -25,8 +26,9 @@ import type {
     ToolAnnotations,
     ToolExecution,
     Transport,
-    Variables
-} from '@modelcontextprotocol/core-internal';
+    Variables,
+    XMcpHeaderScanResult
+} from '@modelcontextprotocol/core-internal/server-runtime';
 import {
     assertCompleteRequestPrompt,
     assertCompleteRequestResourceTemplate,
@@ -43,12 +45,38 @@ import {
     UriTemplate,
     validateAndWarnToolName,
     validateStandardSchema
-} from '@modelcontextprotocol/core-internal';
+} from '@modelcontextprotocol/core-internal/server-runtime';
 import type * as z from 'zod/v4';
 
 import { getCompleter, isCompletable } from './completable';
 import type { ServerOptions } from './server';
 import { Server } from './server';
+
+// Server definitions are normally shared by every instance created by a
+// stateless HTTP factory. Converting the same immutable Standard Schema for
+// every request is expensive, so retain one conversion per schema object.
+// WeakMap keeps application schemas collectible when their definitions are
+// no longer referenced.
+const inputSchemaJson = new WeakMap<StandardSchemaWithJSON, Record<string, unknown>>();
+const outputSchemaJson = new WeakMap<StandardSchemaWithJSON, Record<string, unknown>>();
+const inputSchemaHeaderScan = new WeakMap<Record<string, unknown>, XMcpHeaderScanResult>();
+
+function convertedSchema(schema: StandardSchemaWithJSON, io: 'input' | 'output'): Record<string, unknown> {
+    const cache = io === 'input' ? inputSchemaJson : outputSchemaJson;
+    const cached = cache.get(schema);
+    if (cached !== undefined) return cached;
+    const converted = standardSchemaToJsonSchema(schema, io);
+    cache.set(schema, converted);
+    return converted;
+}
+
+function scannedInputSchema(schema: Record<string, unknown>): XMcpHeaderScanResult {
+    const cached = inputSchemaHeaderScan.get(schema);
+    if (cached !== undefined) return cached;
+    const scan = scanXMcpHeaderDeclarations(schema);
+    inputSchemaHeaderScan.set(schema, scan);
+    return scan;
+}
 
 /**
  * High-level MCP server that provides a simpler API for working with resources, tools, and prompts.
@@ -75,6 +103,12 @@ export class McpServer {
     } = {};
     private _registeredTools: { [name: string]: RegisteredTool } = {};
     private _registeredPrompts: { [name: string]: RegisteredPrompt } = {};
+    private _listedTools: Tool[] | undefined;
+    private _listedPrompts: Prompt[] | undefined;
+    private _listedResources: Resource[] | undefined;
+    private _listedResourceTemplates: ListResourceTemplatesResult['resourceTemplates'] | undefined;
+    private _resourceTemplateValues: RegisteredResourceTemplate[] | undefined;
+    private _resourceTemplatesByUri: Map<string, RegisteredResourceTemplate> | undefined;
     /**
      * Per-tool JSON-converted `inputSchema`, memoized so the SEP-2243
      * registration-time scan and the pre-dispatch validation step share one
@@ -106,12 +140,18 @@ export class McpServer {
         // A successful re-derive is memoized so the per-request-factory
         // `createMcpHandler` model does not re-convert on every call.
         try {
-            const json = standardSchemaToJsonSchema(tool.inputSchema, 'input');
+            const json = convertedSchema(tool.inputSchema, 'input');
             this._toolInputSchemaJson[name] = json;
             return json;
         } catch {
             return undefined;
         }
+    }
+
+    /** @internal Returns the memoized SEP-2243 declaration scan for a registered tool. */
+    toolInputHeaderScan(name: string): XMcpHeaderScanResult | undefined {
+        const schema = this.toolInputSchemaJson(name);
+        return schema === undefined ? undefined : scannedInputSchema(schema);
     }
 
     constructor(serverInfo: Implementation, options?: ServerOptions) {
@@ -178,32 +218,36 @@ export class McpServer {
         this.server.setRequestHandler(
             'tools/list',
             (): ListToolsResult => ({
-                tools: Object.entries(this._registeredTools)
-                    .filter(([, tool]) => tool.enabled)
-                    .map(([name, tool]): Tool => {
-                        const toolDefinition: Tool = {
-                            name,
-                            title: tool.title,
-                            description: tool.description,
-                            inputSchema: tool.inputSchema
-                                ? (standardSchemaToJsonSchema(tool.inputSchema, 'input') as Tool['inputSchema'])
-                                : EMPTY_OBJECT_JSON_SCHEMA,
-                            annotations: tool.annotations,
-                            icons: tool.icons,
-                            execution: tool.execution,
-                            _meta: tool._meta
-                        };
+                tools:
+                    this._listedTools ??
+                    (this._listedTools = Object.entries(this._registeredTools)
+                        .filter(([, tool]) => tool.enabled)
+                        .map(([name, tool]): Tool => {
+                            const toolDefinition: Tool = {
+                                name,
+                                title: tool.title,
+                                description: tool.description,
+                                inputSchema: tool.inputSchema
+                                    ? ((this._toolInputSchemaJson[name] ??
+                                          convertedSchema(tool.inputSchema, 'input')) as Tool['inputSchema'])
+                                    : EMPTY_OBJECT_JSON_SCHEMA,
+                                annotations: tool.annotations,
+                                icons: tool.icons,
+                                execution: tool.execution,
+                                _meta: tool._meta
+                            };
 
-                        if (tool.outputSchema) {
-                            // SEP-2106 legacy interop (non-object outputSchema roots wrapped in
-                            // `{type:'object',properties:{result:<natural>},required:['result']}` toward
-                            // 2025-era clients) lives in the 2025 wire codec's `encodeResult('tools/list', …)`
-                            // — this handler is era-blind and emits the natural converted schema.
-                            toolDefinition.outputSchema = standardSchemaToJsonSchema(tool.outputSchema, 'output') as Tool['outputSchema'];
-                        }
+                            if (tool.outputSchema) {
+                                // SEP-2106 legacy interop (non-object outputSchema roots wrapped in
+                                // `{type:'object',properties:{result:<natural>},required:['result']}` toward
+                                // 2025-era clients) lives in the 2025 wire codec's `encodeResult('tools/list', …)`
+                                // — this handler is era-blind and emits the natural converted schema.
+                                toolDefinition.outputSchema = (tool.outputSchemaJson ??
+                                    convertedSchema(tool.outputSchema, 'output')) as Tool['outputSchema'];
+                            }
 
-                        return toolDefinition;
-                    })
+                            return toolDefinition;
+                        }))
             })
         );
 
@@ -400,7 +444,16 @@ export class McpServer {
         request: CompleteRequestResourceTemplate,
         ref: ResourceTemplateReference
     ): Promise<CompleteResult> {
-        const template = Object.values(this._registeredResourceTemplates).find(t => t.resourceTemplate.uriTemplate.toString() === ref.uri);
+        if (this._resourceTemplatesByUri === undefined) {
+            this._resourceTemplatesByUri = new Map();
+            const templates =
+                this._resourceTemplateValues ?? (this._resourceTemplateValues = Object.values(this._registeredResourceTemplates));
+            for (const template of templates) {
+                const uri = template.resourceTemplate.uriTemplate.toString();
+                if (!this._resourceTemplatesByUri.has(uri)) this._resourceTemplatesByUri.set(uri, template);
+            }
+        }
+        const template = this._resourceTemplatesByUri.get(ref.uri);
 
         if (!template) {
             if (this._registeredResources[ref.uri]) {
@@ -438,21 +491,35 @@ export class McpServer {
         });
 
         this.server.setRequestHandler('resources/list', async (_request, ctx) => {
-            const resources = Object.entries(this._registeredResources)
-                .filter(([_, resource]) => resource.enabled)
-                .map(([uri, resource]) => ({
-                    uri,
-                    name: resource.name,
-                    ...resource.metadata
-                }));
+            const resources =
+                this._listedResources ??
+                (this._listedResources = Object.entries(this._registeredResources)
+                    .filter(([, resource]) => resource.enabled)
+                    .map(([uri, resource]) => ({
+                        uri,
+                        name: resource.name,
+                        ...resource.metadata
+                    })));
 
-            const templateResources: Resource[] = [];
-            for (const template of Object.values(this._registeredResourceTemplates)) {
+            const pendingTemplateResources: Promise<ListResourcesResult>[] = [];
+            const listedTemplates: RegisteredResourceTemplate[] = [];
+            const templates =
+                this._resourceTemplateValues ?? (this._resourceTemplateValues = Object.values(this._registeredResourceTemplates));
+            for (const template of templates) {
                 if (!template.resourceTemplate.listCallback) {
                     continue;
                 }
+                listedTemplates.push(template);
+                pendingTemplateResources.push(Promise.resolve(template.resourceTemplate.listCallback(ctx)));
+            }
 
-                const result = await template.resourceTemplate.listCallback(ctx);
+            // Template lists are independent sources. Resolve them together,
+            // then merge in registration order (Promise.all preserves input
+            // order) instead of adding one source's latency to the next.
+            const templateResources: Resource[] = [];
+            const listedResults = await Promise.all(pendingTemplateResources);
+            for (const [index, result] of listedResults.entries()) {
+                const template = listedTemplates[index]!;
                 for (const resource of result.resources) {
                     templateResources.push({
                         ...template.metadata,
@@ -466,11 +533,13 @@ export class McpServer {
         });
 
         this.server.setRequestHandler('resources/templates/list', async () => {
-            const resourceTemplates = Object.entries(this._registeredResourceTemplates).map(([name, template]) => ({
-                name,
-                uriTemplate: template.resourceTemplate.uriTemplate.toString(),
-                ...template.metadata
-            }));
+            const resourceTemplates =
+                this._listedResourceTemplates ??
+                (this._listedResourceTemplates = Object.entries(this._registeredResourceTemplates).map(([name, template]) => ({
+                    name,
+                    uriTemplate: template.resourceTemplate.uriTemplate.toString(),
+                    ...template.metadata
+                })));
 
             return { resourceTemplates };
         });
@@ -499,7 +568,9 @@ export class McpServer {
             }
 
             // Then check templates
-            for (const template of Object.values(this._registeredResourceTemplates)) {
+            const templates =
+                this._resourceTemplateValues ?? (this._resourceTemplateValues = Object.values(this._registeredResourceTemplates));
+            for (const template of templates) {
                 const variables = template.resourceTemplate.uriTemplate.match(uri.toString());
                 if (variables) {
                     return attachCacheHintFallback(await template.readCallback(uri, variables, ctx), template.cacheHint);
@@ -534,18 +605,20 @@ export class McpServer {
         this.server.setRequestHandler(
             'prompts/list',
             (): ListPromptsResult => ({
-                prompts: Object.entries(this._registeredPrompts)
-                    .filter(([, prompt]) => prompt.enabled)
-                    .map(([name, prompt]): Prompt => {
-                        return {
-                            name,
-                            title: prompt.title,
-                            description: prompt.description,
-                            arguments: prompt.argsSchema ? promptArgumentsFromStandardSchema(prompt.argsSchema) : undefined,
-                            icons: prompt.icons,
-                            _meta: prompt._meta
-                        };
-                    })
+                prompts:
+                    this._listedPrompts ??
+                    (this._listedPrompts = Object.entries(this._registeredPrompts)
+                        .filter(([, prompt]) => prompt.enabled)
+                        .map(([name, prompt]): Prompt => {
+                            return {
+                                name,
+                                title: prompt.title,
+                                description: prompt.description,
+                                arguments: prompt.argsSchema ? promptArgumentsFromStandardSchema(prompt.argsSchema) : undefined,
+                                icons: prompt.icons,
+                                _meta: prompt._meta
+                            };
+                        }))
             })
         );
 
@@ -828,9 +901,9 @@ export class McpServer {
         // the "warn, never throw" contract.
         if (inputSchema !== undefined) {
             try {
-                const json = standardSchemaToJsonSchema(inputSchema, 'input');
+                const json = convertedSchema(inputSchema, 'input');
                 this._toolInputSchemaJson[name] = json;
-                const scan = scanXMcpHeaderDeclarations(json);
+                const scan = scannedInputSchema(json);
                 if (!scan.valid) {
                     console.warn(
                         `[mcp-sdk] tool '${name}' carries an invalid x-mcp-header declaration and will be excluded by ` +
@@ -1126,6 +1199,10 @@ export class McpServer {
      * Sends a resource list changed event to the client, if connected.
      */
     sendResourceListChanged() {
+        this._listedResources = undefined;
+        this._listedResourceTemplates = undefined;
+        this._resourceTemplateValues = undefined;
+        this._resourceTemplatesByUri = undefined;
         if (this.isConnected()) {
             this.server.sendResourceListChanged();
         }
@@ -1135,6 +1212,7 @@ export class McpServer {
      * Sends a tool list changed event to the client, if connected.
      */
     sendToolListChanged() {
+        this._listedTools = undefined;
         if (this.isConnected()) {
             this.server.sendToolListChanged();
         }
@@ -1144,6 +1222,7 @@ export class McpServer {
      * Sends a prompt list changed event to the client, if connected.
      */
     sendPromptListChanged() {
+        this._listedPrompts = undefined;
         if (this.isConnected()) {
             this.server.sendPromptListChanged();
         }
@@ -1335,7 +1414,7 @@ const EMPTY_OBJECT_JSON_SCHEMA = {
 function convertOutputSchemaJson(outputSchema: StandardSchemaWithJSON | undefined): Record<string, unknown> | undefined {
     if (outputSchema === undefined) return undefined;
     try {
-        return standardSchemaToJsonSchema(outputSchema, 'output');
+        return convertedSchema(outputSchema, 'output');
     } catch {
         return undefined;
     }
@@ -1486,7 +1565,10 @@ function createPromptHandler(
 }
 
 function createCompletionResult(suggestions: readonly unknown[]): CompleteResult {
-    const values = suggestions.map(String).slice(0, 100);
+    // The protocol returns at most 100 values. Convert only those values;
+    // callers may provide a much larger candidate set so mapping first would
+    // allocate and stringify data that can never leave the server.
+    const values = suggestions.slice(0, 100).map(String);
     return {
         completion: {
             values,

@@ -26,7 +26,7 @@ import type {
     RequestOptions,
     Result,
     ServerContext
-} from '@modelcontextprotocol/core-internal';
+} from '@modelcontextprotocol/core-internal/server-runtime';
 import {
     inputRequiredRoundsExceededMessage,
     isInputRequiredResult,
@@ -39,7 +39,7 @@ import {
     requiredClientCapabilitiesForInputRequest,
     sleep,
     withRequestStateValue
-} from '@modelcontextprotocol/core-internal';
+} from '@modelcontextprotocol/core-internal/server-runtime';
 
 /**
  * Default handler re-entries per originating request — tighter than the

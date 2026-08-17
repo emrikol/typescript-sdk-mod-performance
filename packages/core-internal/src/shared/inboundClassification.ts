@@ -72,7 +72,7 @@
 import { PROTOCOL_VERSION_META_KEY } from '../types/constants';
 import { ProtocolErrorCode } from '../types/enums';
 import { ProtocolError, UnsupportedProtocolVersionError } from '../types/errors';
-import { isJSONRPCErrorResponse, isJSONRPCNotification, isJSONRPCRequest, isJSONRPCResultResponse } from '../types/guards';
+import { jsonRPCMessageKind } from '../types/messageClassification';
 import type { JSONRPCNotification, JSONRPCRequest, MessageClassification } from '../types/types';
 import { envelopeClaimVersion, hasEnvelopeClaim, requestMetaOf, validateEnvelopeMeta } from './envelope';
 // Value encoding is shared between the standard `Mcp-Name` header and the
@@ -680,12 +680,7 @@ function classifyBatch(body: readonly unknown[]): InboundClassificationOutcome {
                 true
             );
         }
-        const valid =
-            isJSONRPCRequest(element) ||
-            isJSONRPCNotification(element) ||
-            isJSONRPCResultResponse(element) ||
-            isJSONRPCErrorResponse(element);
-        if (!valid) {
+        if (jsonRPCMessageKind(element) === undefined) {
             return rejection(
                 'jsonrpc-shape',
                 'batch-with-invalid-element',
@@ -879,14 +874,16 @@ export function classifyInboundRequest(request: InboundHttpRequest): InboundClas
     // RFC 9110 §5.5: field parsing excludes optional whitespace around a
     // field value. Fetch implementations normally perform this normalization,
     // but transport-neutral callers and some runtimes can expose raw OWS.
-    request = {
-        ...request,
-        ...(request.protocolVersionHeader !== undefined && {
-            protocolVersionHeader: stripHttpOws(request.protocolVersionHeader)
-        }),
-        ...(request.mcpMethodHeader !== undefined && { mcpMethodHeader: stripHttpOws(request.mcpMethodHeader) }),
-        ...(request.mcpNameHeader !== undefined && { mcpNameHeader: stripHttpOws(request.mcpNameHeader) })
-    };
+    const protocolVersionHeader = request.protocolVersionHeader === undefined ? undefined : stripHttpOws(request.protocolVersionHeader);
+    const mcpMethodHeader = request.mcpMethodHeader === undefined ? undefined : stripHttpOws(request.mcpMethodHeader);
+    const mcpNameHeader = request.mcpNameHeader === undefined ? undefined : stripHttpOws(request.mcpNameHeader);
+    if (
+        protocolVersionHeader !== request.protocolVersionHeader ||
+        mcpMethodHeader !== request.mcpMethodHeader ||
+        mcpNameHeader !== request.mcpNameHeader
+    ) {
+        request = { ...request, protocolVersionHeader, mcpMethodHeader, mcpNameHeader };
+    }
 
     if (request.httpMethod.toUpperCase() !== 'POST') {
         // Body-less 2025-era session operations (and any other non-POST
@@ -898,17 +895,19 @@ export function classifyInboundRequest(request: InboundHttpRequest): InboundClas
     if (Array.isArray(body)) {
         return classifyBatch(body);
     }
-    if (isJSONRPCResultResponse(body) || isJSONRPCErrorResponse(body)) {
-        // Posted responses are 2025-era session traffic (replies to
-        // server-initiated requests over a session); the modern era has no
-        // such channel.
-        return { kind: 'legacy', reason: 'response' };
-    }
-    if (isPlainObject(body) && isJSONRPCRequest(body)) {
-        return classifyRequestBody(request, body);
-    }
-    if (isPlainObject(body) && isJSONRPCNotification(body)) {
-        return classifyNotificationBody(request, body);
+    if (isPlainObject(body)) {
+        switch (jsonRPCMessageKind(body)) {
+            case 'result':
+            case 'error': {
+                return { kind: 'legacy', reason: 'response' };
+            }
+            case 'request': {
+                return classifyRequestBody(request, body as JSONRPCRequest);
+            }
+            case 'notification': {
+                return classifyNotificationBody(request, body as JSONRPCNotification);
+            }
+        }
     }
     return rejection(
         'jsonrpc-shape',

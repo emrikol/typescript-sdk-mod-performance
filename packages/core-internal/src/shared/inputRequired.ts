@@ -17,8 +17,8 @@
  * discriminator, and hand-built result literals are equally legal — the
  * server seam re-checks the at-least-one rule for them.
  */
+import { isInputRequiredResult } from '../types/assertions';
 import { ProtocolError } from '../types/errors';
-import { isInputRequiredResult } from '../types/guards';
 import type {
     CreateMessageRequestParams,
     CreateMessageResult,
