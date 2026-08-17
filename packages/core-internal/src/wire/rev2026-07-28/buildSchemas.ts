@@ -1420,6 +1420,11 @@ export type Rev2026WireSchemas = ReturnType<typeof build>;
 
 let memo: Rev2026WireSchemas | undefined;
 
+/** @internal Diagnostic used to pin construction-free package imports. */
+export function schemasBuilt2026(): boolean {
+    return memo !== undefined;
+}
+
 /**
  * Builds the era wire-schema set on first call and returns the same object
  * thereafter. Module evaluation stays construction-free so importing the

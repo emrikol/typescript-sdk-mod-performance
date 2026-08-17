@@ -117,6 +117,20 @@ export type ServerOptions = ProtocolOptions & {
     cacheHints?: Partial<Record<CacheableResultMethod, CacheHint>>;
 
     /**
+     * Retain the SDK's performance caches for immutable schema conversions,
+     * tool-header scans, converted tool schemas, discovery lists, and resource
+     * template indexes.
+     *
+     * Set this to `false` for memory-constrained servers that prefer to redo
+     * this work instead of retaining it. This changes only the CPU/memory
+     * tradeoff: validation, advertised schemas, registry contents, and wire
+     * responses remain the same.
+     *
+     * @default true
+     */
+    performanceCaches?: boolean;
+
+    /**
      * Multi-round-trip serving knobs. On 2026-era requests the client
      * fulfils `input_required` returns; on 2025-era connections the SDK's
      * legacy shim fulfils them server-side (real server→client requests +

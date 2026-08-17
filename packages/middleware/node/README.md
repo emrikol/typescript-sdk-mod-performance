@@ -4,6 +4,8 @@ Node.js adapters for the MCP TypeScript server SDK.
 
 This package is a thin Node.js integration layer for [`@modelcontextprotocol/server`](https://github.com/modelcontextprotocol/typescript-sdk/tree/main/packages/server). It provides a Streamable HTTP transport that works with Node’s `IncomingMessage` / `ServerResponse`.
 
+Its operational imports use `@modelcontextprotocol/server/runtime`, so importing the adapter does not evaluate the complete server root or optional public protocol-schema catalog. Wire-schema construction remains lazy; the adapter never calls `preloadSchemas()`.
+
 For web‑standard runtimes (Cloudflare Workers, Deno, Bun, etc.), use `WebStandardStreamableHTTPServerTransport` from `@modelcontextprotocol/server` directly.
 
 ## Install
@@ -31,7 +33,7 @@ npm install @modelcontextprotocol/server @modelcontextprotocol/node
 ```ts
 import { createMcpExpressApp } from '@modelcontextprotocol/express';
 import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
-import { McpServer } from '@modelcontextprotocol/server';
+import { McpServer } from '@modelcontextprotocol/server/runtime';
 
 const server = new McpServer({ name: 'my-server', version: '1.0.0' });
 const app = createMcpExpressApp();
@@ -57,7 +59,7 @@ must not touch the request further.
 ```ts
 import { createServer } from 'node:http';
 import { localhostHostValidation, localhostOriginValidation, NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
-import { McpServer } from '@modelcontextprotocol/server';
+import { McpServer } from '@modelcontextprotocol/server/runtime';
 
 const server = new McpServer({ name: 'my-server', version: '1.0.0' });
 

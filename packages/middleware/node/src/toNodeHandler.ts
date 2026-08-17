@@ -7,7 +7,7 @@
  * (Express, Fastify, plain `node:http`) wrap it once with this helper:
  *
  * ```ts
- * import { createMcpHandler } from '@modelcontextprotocol/server';
+ * import { createMcpHandler } from '@modelcontextprotocol/server/runtime';
  * import { toNodeHandler } from '@modelcontextprotocol/node';
  *
  * const handler = createMcpHandler(factory);
@@ -26,7 +26,7 @@
  * (validated authentication info attached by upstream middleware) and forwards
  * it as the handler's pass-through `authInfo`.
  */
-import type { AuthInfo, McpHandlerRequestOptions } from '@modelcontextprotocol/server';
+import type { AuthInfo, McpHandlerRequestOptions } from '@modelcontextprotocol/server/runtime';
 
 /**
  * Minimal duck-typed shape of a Node.js `IncomingMessage` accepted by

@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
-import { localhostAllowedHostnames, validateHostHeader } from '@modelcontextprotocol/server';
+import { localhostAllowedHostnames, validateHostHeader } from '@modelcontextprotocol/server/runtime';
 
 /**
  * Node.js request guard for DNS rebinding protection.

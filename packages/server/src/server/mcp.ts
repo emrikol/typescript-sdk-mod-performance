@@ -53,15 +53,15 @@ import type { ServerOptions } from './server';
 import { Server } from './server';
 
 // Server definitions are normally shared by every instance created by a
-// stateless HTTP factory. Converting the same immutable Standard Schema for
-// every request is expensive, so retain one conversion per schema object.
-// WeakMap keeps application schemas collectible when their definitions are
-// no longer referenced.
+// stateless HTTP factory. In the default mode, retain one conversion per
+// immutable Standard Schema object; WeakMap keeps application schemas
+// collectible. ServerOptions.performanceCaches=false bypasses these maps.
 const inputSchemaJson = new WeakMap<StandardSchemaWithJSON, Record<string, unknown>>();
 const outputSchemaJson = new WeakMap<StandardSchemaWithJSON, Record<string, unknown>>();
 const inputSchemaHeaderScan = new WeakMap<Record<string, unknown>, XMcpHeaderScanResult>();
 
-function convertedSchema(schema: StandardSchemaWithJSON, io: 'input' | 'output'): Record<string, unknown> {
+function convertedSchema(schema: StandardSchemaWithJSON, io: 'input' | 'output', cacheEnabled: boolean): Record<string, unknown> {
+    if (!cacheEnabled) return standardSchemaToJsonSchema(schema, io);
     const cache = io === 'input' ? inputSchemaJson : outputSchemaJson;
     const cached = cache.get(schema);
     if (cached !== undefined) return cached;
@@ -70,7 +70,8 @@ function convertedSchema(schema: StandardSchemaWithJSON, io: 'input' | 'output')
     return converted;
 }
 
-function scannedInputSchema(schema: Record<string, unknown>): XMcpHeaderScanResult {
+function scannedInputSchema(schema: Record<string, unknown>, cacheEnabled: boolean): XMcpHeaderScanResult {
+    if (!cacheEnabled) return scanXMcpHeaderDeclarations(schema);
     const cached = inputSchemaHeaderScan.get(schema);
     if (cached !== undefined) return cached;
     const scan = scanXMcpHeaderDeclarations(schema);
@@ -96,6 +97,8 @@ export class McpServer {
      * The underlying {@linkcode Server} instance, useful for advanced operations like sending notifications.
      */
     public readonly server: Server;
+
+    private readonly _performanceCachesEnabled: boolean;
 
     private _registeredResources: { [uri: string]: RegisteredResource } = {};
     private _registeredResourceTemplates: {
@@ -128,7 +131,9 @@ export class McpServer {
     toolInputSchemaJson(name: string): Record<string, unknown> | undefined {
         const tool = this._registeredTools[name];
         if (tool === undefined || !tool.enabled) return undefined;
-        if (Object.hasOwn(this._toolInputSchemaJson, name)) return this._toolInputSchemaJson[name];
+        if (this._performanceCachesEnabled && Object.hasOwn(this._toolInputSchemaJson, name)) {
+            return this._toolInputSchemaJson[name];
+        }
         if (tool.inputSchema === undefined) return EMPTY_OBJECT_JSON_SCHEMA;
         // Lazy path: the memo slot is unset because `registerTool`'s eager
         // conversion threw (and was swallowed per its "warn, never throw"
@@ -140,21 +145,22 @@ export class McpServer {
         // A successful re-derive is memoized so the per-request-factory
         // `createMcpHandler` model does not re-convert on every call.
         try {
-            const json = convertedSchema(tool.inputSchema, 'input');
-            this._toolInputSchemaJson[name] = json;
+            const json = convertedSchema(tool.inputSchema, 'input', this._performanceCachesEnabled);
+            if (this._performanceCachesEnabled) this._toolInputSchemaJson[name] = json;
             return json;
         } catch {
             return undefined;
         }
     }
 
-    /** @internal Returns the memoized SEP-2243 declaration scan for a registered tool. */
+    /** @internal Returns the SEP-2243 declaration scan for a registered tool (memoized in the default mode). */
     toolInputHeaderScan(name: string): XMcpHeaderScanResult | undefined {
         const schema = this.toolInputSchemaJson(name);
-        return schema === undefined ? undefined : scannedInputSchema(schema);
+        return schema === undefined ? undefined : scannedInputSchema(schema, this._performanceCachesEnabled);
     }
 
     constructor(serverInfo: Implementation, options?: ServerOptions) {
+        this._performanceCachesEnabled = options?.performanceCaches ?? true;
         this.server = new Server(serverInfo, options);
 
         // Per the MCP spec, a server that declares a primitive capability MUST respond to its
@@ -171,6 +177,117 @@ export class McpServer {
         if (options?.capabilities?.prompts) {
             this.setPromptRequestHandlers();
         }
+    }
+
+    private _toolDefinitions(): Tool[] {
+        if (this._performanceCachesEnabled && this._listedTools !== undefined) return this._listedTools;
+
+        const tools = Object.entries(this._registeredTools)
+            .filter(([, tool]) => tool.enabled)
+            .map(([name, tool]): Tool => {
+                const toolDefinition: Tool = {
+                    name,
+                    title: tool.title,
+                    description: tool.description,
+                    inputSchema: tool.inputSchema
+                        ? (((this._performanceCachesEnabled ? this._toolInputSchemaJson[name] : undefined) ??
+                              convertedSchema(tool.inputSchema, 'input', this._performanceCachesEnabled)) as Tool['inputSchema'])
+                        : EMPTY_OBJECT_JSON_SCHEMA,
+                    annotations: tool.annotations,
+                    icons: tool.icons,
+                    execution: tool.execution,
+                    _meta: tool._meta
+                };
+
+                if (tool.outputSchema) {
+                    // SEP-2106 legacy interop (non-object outputSchema roots wrapped in
+                    // `{type:'object',properties:{result:<natural>},required:['result']}` toward
+                    // 2025-era clients) lives in the 2025 wire codec's `encodeResult('tools/list', …)`
+                    // — this handler is era-blind and emits the natural converted schema.
+                    toolDefinition.outputSchema = ((this._performanceCachesEnabled ? tool.outputSchemaJson : undefined) ??
+                        convertedSchema(tool.outputSchema, 'output', this._performanceCachesEnabled)) as Tool['outputSchema'];
+                }
+
+                return toolDefinition;
+            });
+
+        if (this._performanceCachesEnabled) this._listedTools = tools;
+        return tools;
+    }
+
+    private _toolOutputSchemaForProjection(tool: RegisteredTool): Record<string, unknown> | undefined {
+        if (tool.outputSchema === undefined) return undefined;
+        if (this._performanceCachesEnabled) return tool.outputSchemaJson;
+        try {
+            return convertedSchema(tool.outputSchema, 'output', false);
+        } catch {
+            // Match the cached mode: conversion failures surface on tools/list,
+            // while tools/call proceeds without result projection metadata.
+            return undefined;
+        }
+    }
+
+    private _staticResourceDefinitions(): Resource[] {
+        if (this._performanceCachesEnabled && this._listedResources !== undefined) return this._listedResources;
+        const resources = Object.entries(this._registeredResources)
+            .filter(([, resource]) => resource.enabled)
+            .map(([uri, resource]) => ({
+                uri,
+                name: resource.name,
+                ...resource.metadata
+            }));
+        if (this._performanceCachesEnabled) this._listedResources = resources;
+        return resources;
+    }
+
+    private _resourceTemplateDefinitions(): ListResourceTemplatesResult['resourceTemplates'] {
+        if (this._performanceCachesEnabled && this._listedResourceTemplates !== undefined) return this._listedResourceTemplates;
+        const templates = Object.entries(this._registeredResourceTemplates).map(([name, template]) => ({
+            name,
+            uriTemplate: template.resourceTemplate.uriTemplate.toString(),
+            ...template.metadata
+        }));
+        if (this._performanceCachesEnabled) this._listedResourceTemplates = templates;
+        return templates;
+    }
+
+    private _resourceTemplateRegistrations(): RegisteredResourceTemplate[] {
+        if (this._performanceCachesEnabled && this._resourceTemplateValues !== undefined) return this._resourceTemplateValues;
+        const templates = Object.values(this._registeredResourceTemplates);
+        if (this._performanceCachesEnabled) this._resourceTemplateValues = templates;
+        return templates;
+    }
+
+    private _resourceTemplateByUri(uri: string): RegisteredResourceTemplate | undefined {
+        if (!this._performanceCachesEnabled) {
+            return this._resourceTemplateRegistrations().find(template => template.resourceTemplate.uriTemplate.toString() === uri);
+        }
+        if (this._resourceTemplatesByUri === undefined) {
+            this._resourceTemplatesByUri = new Map();
+            for (const template of this._resourceTemplateRegistrations()) {
+                const templateUri = template.resourceTemplate.uriTemplate.toString();
+                if (!this._resourceTemplatesByUri.has(templateUri)) this._resourceTemplatesByUri.set(templateUri, template);
+            }
+        }
+        return this._resourceTemplatesByUri.get(uri);
+    }
+
+    private _promptDefinitions(): Prompt[] {
+        if (this._performanceCachesEnabled && this._listedPrompts !== undefined) return this._listedPrompts;
+        const prompts = Object.entries(this._registeredPrompts)
+            .filter(([, prompt]) => prompt.enabled)
+            .map(([name, prompt]): Prompt => {
+                return {
+                    name,
+                    title: prompt.title,
+                    description: prompt.description,
+                    arguments: prompt.argsSchema ? promptArgumentsFromStandardSchema(prompt.argsSchema) : undefined,
+                    icons: prompt.icons,
+                    _meta: prompt._meta
+                };
+            });
+        if (this._performanceCachesEnabled) this._listedPrompts = prompts;
+        return prompts;
     }
 
     /**
@@ -218,36 +335,7 @@ export class McpServer {
         this.server.setRequestHandler(
             'tools/list',
             (): ListToolsResult => ({
-                tools:
-                    this._listedTools ??
-                    (this._listedTools = Object.entries(this._registeredTools)
-                        .filter(([, tool]) => tool.enabled)
-                        .map(([name, tool]): Tool => {
-                            const toolDefinition: Tool = {
-                                name,
-                                title: tool.title,
-                                description: tool.description,
-                                inputSchema: tool.inputSchema
-                                    ? ((this._toolInputSchemaJson[name] ??
-                                          convertedSchema(tool.inputSchema, 'input')) as Tool['inputSchema'])
-                                    : EMPTY_OBJECT_JSON_SCHEMA,
-                                annotations: tool.annotations,
-                                icons: tool.icons,
-                                execution: tool.execution,
-                                _meta: tool._meta
-                            };
-
-                            if (tool.outputSchema) {
-                                // SEP-2106 legacy interop (non-object outputSchema roots wrapped in
-                                // `{type:'object',properties:{result:<natural>},required:['result']}` toward
-                                // 2025-era clients) lives in the 2025 wire codec's `encodeResult('tools/list', …)`
-                                // — this handler is era-blind and emits the natural converted schema.
-                                toolDefinition.outputSchema = (tool.outputSchemaJson ??
-                                    convertedSchema(tool.outputSchema, 'output')) as Tool['outputSchema'];
-                            }
-
-                            return toolDefinition;
-                        }))
+                tools: this._toolDefinitions()
             })
         );
 
@@ -270,7 +358,7 @@ export class McpServer {
                 // `projectCallToolResult`. The codec receives the SAME advertised JSON Schema
                 // `tools/list` emits (and that the codec's `encodeResult('tools/list', …)` may have
                 // wrapped) so the listing and the call cannot diverge.
-                return this.server.projectCallToolResult(result, tool.outputSchemaJson);
+                return this.server.projectCallToolResult(result, this._toolOutputSchemaForProjection(tool));
             } catch (error) {
                 if (error instanceof ProtocolError && error.code === ProtocolErrorCode.UrlElicitationRequired) {
                     throw error; // Return the error to the caller without wrapping in CallToolResult
@@ -444,16 +532,7 @@ export class McpServer {
         request: CompleteRequestResourceTemplate,
         ref: ResourceTemplateReference
     ): Promise<CompleteResult> {
-        if (this._resourceTemplatesByUri === undefined) {
-            this._resourceTemplatesByUri = new Map();
-            const templates =
-                this._resourceTemplateValues ?? (this._resourceTemplateValues = Object.values(this._registeredResourceTemplates));
-            for (const template of templates) {
-                const uri = template.resourceTemplate.uriTemplate.toString();
-                if (!this._resourceTemplatesByUri.has(uri)) this._resourceTemplatesByUri.set(uri, template);
-            }
-        }
-        const template = this._resourceTemplatesByUri.get(ref.uri);
+        const template = this._resourceTemplateByUri(ref.uri);
 
         if (!template) {
             if (this._registeredResources[ref.uri]) {
@@ -491,21 +570,11 @@ export class McpServer {
         });
 
         this.server.setRequestHandler('resources/list', async (_request, ctx) => {
-            const resources =
-                this._listedResources ??
-                (this._listedResources = Object.entries(this._registeredResources)
-                    .filter(([, resource]) => resource.enabled)
-                    .map(([uri, resource]) => ({
-                        uri,
-                        name: resource.name,
-                        ...resource.metadata
-                    })));
+            const resources = this._staticResourceDefinitions();
 
             const pendingTemplateResources: Promise<ListResourcesResult>[] = [];
             const listedTemplates: RegisteredResourceTemplate[] = [];
-            const templates =
-                this._resourceTemplateValues ?? (this._resourceTemplateValues = Object.values(this._registeredResourceTemplates));
-            for (const template of templates) {
+            for (const template of this._resourceTemplateRegistrations()) {
                 if (!template.resourceTemplate.listCallback) {
                     continue;
                 }
@@ -533,15 +602,7 @@ export class McpServer {
         });
 
         this.server.setRequestHandler('resources/templates/list', async () => {
-            const resourceTemplates =
-                this._listedResourceTemplates ??
-                (this._listedResourceTemplates = Object.entries(this._registeredResourceTemplates).map(([name, template]) => ({
-                    name,
-                    uriTemplate: template.resourceTemplate.uriTemplate.toString(),
-                    ...template.metadata
-                })));
-
-            return { resourceTemplates };
+            return { resourceTemplates: this._resourceTemplateDefinitions() };
         });
 
         this.server.setRequestHandler('resources/read', async (request, ctx) => {
@@ -568,9 +629,7 @@ export class McpServer {
             }
 
             // Then check templates
-            const templates =
-                this._resourceTemplateValues ?? (this._resourceTemplateValues = Object.values(this._registeredResourceTemplates));
-            for (const template of templates) {
+            for (const template of this._resourceTemplateRegistrations()) {
                 const variables = template.resourceTemplate.uriTemplate.match(uri.toString());
                 if (variables) {
                     return attachCacheHintFallback(await template.readCallback(uri, variables, ctx), template.cacheHint);
@@ -605,20 +664,7 @@ export class McpServer {
         this.server.setRequestHandler(
             'prompts/list',
             (): ListPromptsResult => ({
-                prompts:
-                    this._listedPrompts ??
-                    (this._listedPrompts = Object.entries(this._registeredPrompts)
-                        .filter(([, prompt]) => prompt.enabled)
-                        .map(([name, prompt]): Prompt => {
-                            return {
-                                name,
-                                title: prompt.title,
-                                description: prompt.description,
-                                arguments: prompt.argsSchema ? promptArgumentsFromStandardSchema(prompt.argsSchema) : undefined,
-                                icons: prompt.icons,
-                                _meta: prompt._meta
-                            };
-                        }))
+                prompts: this._promptDefinitions()
             })
         );
 
@@ -901,9 +947,9 @@ export class McpServer {
         // the "warn, never throw" contract.
         if (inputSchema !== undefined) {
             try {
-                const json = convertedSchema(inputSchema, 'input');
-                this._toolInputSchemaJson[name] = json;
-                const scan = scannedInputSchema(json);
+                const json = convertedSchema(inputSchema, 'input', this._performanceCachesEnabled);
+                if (this._performanceCachesEnabled) this._toolInputSchemaJson[name] = json;
+                const scan = scannedInputSchema(json, this._performanceCachesEnabled);
                 if (!scan.valid) {
                     console.warn(
                         `[mcp-sdk] tool '${name}' carries an invalid x-mcp-header declaration and will be excluded by ` +
@@ -925,7 +971,7 @@ export class McpServer {
             description,
             inputSchema,
             outputSchema,
-            outputSchemaJson: convertOutputSchemaJson(outputSchema),
+            outputSchemaJson: convertOutputSchemaJson(outputSchema, this._performanceCachesEnabled),
             annotations,
             icons,
             execution,
@@ -980,7 +1026,7 @@ export class McpServer {
 
                 if (updates.outputSchema !== undefined) {
                     registeredTool.outputSchema = updates.outputSchema;
-                    registeredTool.outputSchemaJson = convertOutputSchemaJson(updates.outputSchema);
+                    registeredTool.outputSchemaJson = convertOutputSchemaJson(updates.outputSchema, this._performanceCachesEnabled);
                 }
                 if (updates.annotations !== undefined) registeredTool.annotations = updates.annotations;
                 if (updates.icons !== undefined) registeredTool.icons = updates.icons;
@@ -1347,11 +1393,10 @@ export type RegisteredTool = {
     outputSchema?: StandardSchemaWithJSON;
     /**
      * @hidden
-     * The converted JSON Schema of `outputSchema`, memoised at registration (and on
-     * `update({outputSchema})`) so the `tools/call` handler passes the SAME advertised schema
-     * `tools/list` emits to the wire codec's `projectCallToolResult` — the SEP-2106 `{result:…}`
-     * wrap predicate follows the schema's root, never the runtime value shape. `undefined` when
-     * no `outputSchema` is registered or its conversion threw (see {@link convertOutputSchemaJson}).
+     * In the default cache mode, the converted JSON Schema of `outputSchema`, memoised at
+     * registration (and on `update({outputSchema})`) so the `tools/call` handler passes the SAME
+     * advertised schema `tools/list` emits to the wire codec's `projectCallToolResult`. In
+     * low-memory mode it stays `undefined` and the schema is converted transiently when needed.
      */
     outputSchemaJson?: Record<string, unknown>;
     annotations?: ToolAnnotations;
@@ -1406,15 +1451,18 @@ const EMPTY_OBJECT_JSON_SCHEMA = {
 };
 
 /**
- * Convert a registered `outputSchema` to JSON Schema, memoised on {@link RegisteredTool.outputSchemaJson}
- * so `tools/call` passes the SAME advertised schema to the wire codec's `projectCallToolResult` that
- * `tools/list` emits (and that the 2025 codec's `encodeResult('tools/list', …)` may wrap). A conversion
- * failure yields `undefined` so the failure surfaces where it always has (`tools/list`).
+ * Convert a registered `outputSchema` to JSON Schema for retention on
+ * {@link RegisteredTool.outputSchemaJson}. Low-memory mode skips the conversion here; callers
+ * convert transiently. A conversion failure yields `undefined` so the failure surfaces where it
+ * always has (`tools/list`).
  */
-function convertOutputSchemaJson(outputSchema: StandardSchemaWithJSON | undefined): Record<string, unknown> | undefined {
-    if (outputSchema === undefined) return undefined;
+function convertOutputSchemaJson(
+    outputSchema: StandardSchemaWithJSON | undefined,
+    cacheEnabled: boolean
+): Record<string, unknown> | undefined {
+    if (outputSchema === undefined || !cacheEnabled) return undefined;
     try {
-        return convertedSchema(outputSchema, 'output');
+        return convertedSchema(outputSchema, 'output', true);
     } catch {
         return undefined;
     }

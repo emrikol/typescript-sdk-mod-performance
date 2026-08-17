@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
-import { localhostAllowedOrigins, validateOriginHeader } from '@modelcontextprotocol/server';
+import { localhostAllowedOrigins, validateOriginHeader } from '@modelcontextprotocol/server/runtime';
 
 /**
  * Node.js request guard for Origin header validation.

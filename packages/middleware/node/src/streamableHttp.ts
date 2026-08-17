@@ -17,8 +17,8 @@ import type {
     RequestId,
     Transport,
     WebStandardStreamableHTTPServerTransportOptions
-} from '@modelcontextprotocol/server';
-import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
+} from '@modelcontextprotocol/server/runtime';
+import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server/runtime';
 
 /**
  * Configuration options for {@linkcode NodeStreamableHTTPServerTransport}

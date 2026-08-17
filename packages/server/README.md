@@ -33,13 +33,19 @@ Use the package root when the same module also imports public runtime schema con
 
 Immutable schema conversion, tool-header scans, and discovery lists are cached in bounded `WeakMap` or per-server generation caches. Registry updates invalidate the affected discovery cache immediately; no idle timers or background unloading are used.
 
+On a memory-constrained server, pass `{ performanceCaches: false }` as the second `McpServer` constructor argument. The option defaults to `true`; disabling it bypasses schema-conversion and tool-header caches, retained converted tool schemas, discovery-list caches, and resource-template indexes without changing validation, schemas, inventory, cache hints, protocol behavior, or wire output.
+
+```ts
+const server = new McpServer({ name: 'low-memory-server', version: '1.0.0' }, { performanceCaches: false });
+```
+
 Run the reproducible HTTP profile with:
 
 ```bash
-pnpm profile:server -- packages/server/dist/runtime.mjs 20000
+pnpm profile:server -- --iterations 20000 --runs 7
 ```
 
-The profiler reports cold import CPU/memory, first-request cost, hot per-request CPU/wall time, and retained memory. Compare fresh processes and use medians; a single run is noisy.
+The profiler compares fresh-process medians for runtime+caching, runtime+no-caching, and root+caching. It reports cold import, registration, discovery, first-request and 20,000-request hot-path CPU/wall time, latency, throughput, and post-GC heap/RSS.
 
 ## Documentation
 
