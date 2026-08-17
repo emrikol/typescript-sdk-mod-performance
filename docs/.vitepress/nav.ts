@@ -69,6 +69,7 @@ export const guideSidebar: DefaultTheme.SidebarItem[] = [
             { text: 'Schema libraries', link: '/advanced/schema-libraries' },
             { text: 'Custom transports', link: '/advanced/custom-transports' },
             { text: 'Wire schemas', link: '/advanced/wire-schemas' },
+            { text: 'Performance', link: '/advanced/performance' },
             { text: 'Gateway', link: '/advanced/gateway' }
         ]
     },

@@ -37,6 +37,8 @@
         "build:all": "pnpm -r build",
         "ci:publish": "pnpm run build:all && pnpm changeset publish",
         "prepack:all": "pnpm -r prepack",
+        "profile:server": "node --expose-gc scripts/profile-server.mjs",
+        "profile:client": "node --expose-gc scripts/profile-client.mjs",
         "lint:all": "pnpm sync:snippets --check && pnpm -r lint",
         "lint:fix:all": "pnpm sync:snippets && pnpm -r lint:fix",
         "check:all": "pnpm sync:snippets --check && pnpm -r typecheck && pnpm -r lint && pnpm run docs:check",
