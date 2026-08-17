@@ -1,7 +1,7 @@
 {
     "name": "@modelcontextprotocol/sdk",
     "private": true,
-    "version": "2.0.0-alpha.0",
+    "version": "2.0.0-alpha.0-mod-perf",
     "description": "Model Context Protocol implementation for TypeScript",
     "license": "SEE LICENSE IN LICENSE",
     "author": "Model Context Protocol a Series of LF Projects, LLC.",
