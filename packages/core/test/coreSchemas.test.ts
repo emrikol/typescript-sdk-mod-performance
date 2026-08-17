@@ -39,13 +39,15 @@ describe('@modelcontextprotocol/core', () => {
         const SPEC_INTERNAL_HELPERS = [
             'BaseRequestParamsSchema',
             'ClientTasksCapabilitySchema',
+            'ElicitRequestedSchemaSchema',
             'ListChangedOptionsBaseSchema',
             'NotificationsParamsSchema',
             'ServerTasksCapabilitySchema'
         ];
-        const specSchemas = exportedSchemaConsts(readCore('../src/schemas.ts'), /^export const (\w+Schema)\b/gm).filter(
-            name => !SPEC_INTERNAL_HELPERS.includes(name)
-        );
+        const specSchemas = [
+            ...exportedSchemaConsts(readCore('../src/schemas.ts'), /^export const (\w+Schema)\b/gm),
+            ...exportedSchemaConsts(readCore('../src/elicitationSchema.ts'), /^export const (\w+Schema)\b/gm)
+        ].filter(name => !SPEC_INTERNAL_HELPERS.includes(name));
         const specTypeSrc = readCore('../../core-internal/src/types/specTypeSchema.ts');
         const authStart = specTypeSrc.indexOf('const authSchemas = {');
         const authObj = specTypeSrc.slice(authStart, specTypeSrc.indexOf('} as const', authStart));

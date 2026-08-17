@@ -11,13 +11,14 @@ import { describe, expect, it } from 'vitest';
 import * as z from 'zod/v4';
 
 import { invoke } from '../../src/server/invoke';
-import { McpServer } from '../../src/server/mcp';
+import { McpServer, ResourceTemplate } from '../../src/server/mcp';
 
 const LEGACY = { classification: { era: 'legacy' as const } };
 
 const list = async (server: McpServer, method: string, key: string): Promise<string[]> => {
     const response = await invoke(server, { jsonrpc: '2.0', id: 1, method, params: {} }, LEGACY);
-    const body = (await response.json()) as { result: Record<string, Array<{ name: string }>> };
+    const body = (await response.json()) as { result?: Record<string, Array<{ name: string }>>; error?: unknown };
+    if (body.result === undefined) throw new Error(JSON.stringify(body.error));
     return body.result[key]!.map(item => item.name);
 };
 
@@ -47,5 +48,46 @@ describe('McpServer list ordering', () => {
         expect(await list(server, 'prompts/list', 'prompts')).toEqual(promptOrder);
         expect(await list(server, 'resources/list', 'resources')).toEqual(resourceOrder);
         expect(await list(server, 'resources/list', 'resources')).toEqual(resourceOrder);
+    });
+
+    it('lists independent resource templates concurrently and preserves registration order', async () => {
+        const server = new McpServer({ name: 'ordering', version: '0' });
+        let releaseFirst!: () => void;
+        const firstMayFinish = new Promise<void>(resolve => {
+            releaseFirst = resolve;
+        });
+        let secondStarted!: () => void;
+        const secondDidStart = new Promise<void>(resolve => {
+            secondStarted = resolve;
+        });
+
+        server.registerResource(
+            'first-template',
+            new ResourceTemplate('mem://first/{id}', {
+                list: async () => {
+                    await firstMayFinish;
+                    return { resources: [{ uri: 'mem://first/1', name: 'first' }] };
+                }
+            }),
+            {},
+            async () => ({ contents: [] })
+        );
+        server.registerResource(
+            'second-template',
+            new ResourceTemplate('mem://second/{id}', {
+                list: async () => {
+                    secondStarted();
+                    return { resources: [{ uri: 'mem://second/1', name: 'second' }] };
+                }
+            }),
+            {},
+            async () => ({ contents: [] })
+        );
+
+        const pending = list(server, 'resources/list', 'resources');
+        await secondDidStart;
+        releaseFirst();
+
+        await expect(pending).resolves.toEqual(['first', 'second']);
     });
 });

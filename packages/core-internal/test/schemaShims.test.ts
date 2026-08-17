@@ -42,9 +42,11 @@ describe('core-internal schema shims only forward to @modelcontextprotocol/core'
                 );
             });
 
-            test('imports only from @modelcontextprotocol/core/internal', () => {
+            test('imports only from its matching @modelcontextprotocol/core internal entry', () => {
+                const expected =
+                    shim === 'types/constants.ts' ? '@modelcontextprotocol/core/internal/constants' : '@modelcontextprotocol/core/internal';
                 for (const m of source.matchAll(/from\s+['"]([^'"]+)['"]/g)) {
-                    expect(m[1], `${shim} forwards from an unexpected module — ${NEW_HOME}`).toBe('@modelcontextprotocol/core/internal');
+                    expect(m[1], `${shim} forwards from an unexpected module — ${NEW_HOME}`).toBe(expected);
                 }
             });
         });

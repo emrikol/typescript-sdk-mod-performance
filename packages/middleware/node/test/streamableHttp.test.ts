@@ -104,6 +104,18 @@ async function readSSEEvent(response: Response): Promise<string> {
     return new TextDecoder().decode(value);
 }
 
+/** Read bounded SSE chunks until the expected event has arrived. */
+async function readSSEUntil(reader: ReadableStreamDefaultReader<Uint8Array>, expected: string): Promise<string> {
+    const decoder = new TextDecoder();
+    let text = '';
+    for (let chunk = 0; chunk < 10 && !text.includes(expected); chunk++) {
+        const next = await reader.read();
+        if (next.done) break;
+        text += decoder.decode(next.value, { stream: true });
+    }
+    return text;
+}
+
 /**
  * Helper to send JSON-RPC request
  */
@@ -728,8 +740,7 @@ describe('Zod v4', () => {
             const reader = response.body?.getReader();
 
             // The responses may come in any order or together in one chunk
-            const { value } = await reader!.read();
-            const text = new TextDecoder().decode(value);
+            const text = await readSSEUntil(reader!, '"id":"req-2"');
 
             // Check that both responses were sent on the same stream
             expect(text).toContain('"id":"req-1"');
@@ -1515,8 +1526,7 @@ describe('Zod v4', () => {
 
             // Read the replayed notification
             const reconnectReader = reconnectResponse.body?.getReader();
-            const reconnectData = await reconnectReader!.read();
-            const reconnectText = new TextDecoder().decode(reconnectData.value);
+            const reconnectText = await readSSEUntil(reconnectReader!, 'Second notification from MCP server');
 
             // Verify we received the second notification that was sent after our stored eventId
             expect(reconnectText).toContain('Second notification from MCP server');

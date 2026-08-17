@@ -717,7 +717,10 @@ verifies('protocol:timeout:max-total', async ({ transport }: TestArgs) => {
 });
 
 verifies('protocol:timeout:reset-on-progress', async ({ transport }: TestArgs) => {
-    vi.useFakeTimers();
+    // Real socket delivery is driven by the host event loop, so fake timers can
+    // race an SSE chunk that is already in the kernel receive buffer.
+    const useFakeTimers = transport !== 'sse';
+    if (useFakeTimers) vi.useFakeTimers();
     try {
         const makeServer = () => {
             const s = new McpServer({ name: 's', version: '0' });
@@ -767,7 +770,7 @@ verifies('protocol:timeout:reset-on-progress', async ({ transport }: TestArgs) =
             );
 
         for (let i = 1; i <= steps; i++) {
-            await vi.advanceTimersByTimeAsync(delayMs);
+            if (useFakeTimers) await vi.advanceTimersByTimeAsync(delayMs);
             await vi.waitFor(() => expect(received.length).toBeGreaterThanOrEqual(i));
             if (i < steps) expect(settled).toBeUndefined();
         }
@@ -779,7 +782,7 @@ verifies('protocol:timeout:reset-on-progress', async ({ transport }: TestArgs) =
         expect(result.isError).toBeFalsy();
         expect(result.content).toEqual([{ type: 'text', text: `done after ${steps} steps` }]);
     } finally {
-        vi.useRealTimers();
+        if (useFakeTimers) vi.useRealTimers();
     }
 });
 

@@ -268,18 +268,16 @@ describe('SEP-2243 Mcp-Param-* mirroring (modern era)', () => {
         client.onerror = e => errors.push(e);
         await client.connect(clientTx);
 
-        // The pre-send mirroring read AND the post-success validator read both
-        // hit a rejecting `get()`. Neither aborts the call: the request goes
+        // Header mirroring and output validation share one cache read. A
+        // rejecting `get()` does not abort the call: the request goes
         // out without `Mcp-Param-*` headers (cold-cache posture), the
         // server-side result is returned, and both store failures surface via
-        // `onerror`. The post-success guard is the critical one — a store
-        // failure after the server has executed the call must never surface
-        // as a `callTool()` rejection (duplicate-execution hazard on retry).
+        // `onerror` once.
         const result = await client.callTool({ name: 'route', arguments: { region: 'ap' } });
         expect(result.content?.[0]).toEqual({ type: 'text', text: 'ok' });
         expect(callHeaders).toEqual([undefined]);
         expect(listCount()).toBe(0);
-        expect(errors.map(e => e.message)).toEqual(['redis down', 'redis down']);
+        expect(errors.map(e => e.message)).toEqual(['redis down']);
     });
 
     it('a paginating server: the cached aggregate holds every page and a page-2 x-mcp-header tool mirrors on the first call', async () => {

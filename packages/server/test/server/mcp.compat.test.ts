@@ -7,6 +7,39 @@ import type { InferRawShape } from '../../src/server/mcp';
 import { completable } from '../../src/server/completable';
 
 describe('registerTool/registerPrompt accept raw Zod shape (auto-wrapped)', () => {
+    it('reuses schema conversion across stateless server instances', () => {
+        let inputConversions = 0;
+        let outputConversions = 0;
+        const schema = {
+            '~standard': {
+                version: 1 as const,
+                vendor: 'conversion-counter',
+                validate: (value: unknown) => ({ value }),
+                jsonSchema: {
+                    input: () => {
+                        inputConversions += 1;
+                        return { type: 'object', properties: {} };
+                    },
+                    output: () => {
+                        outputConversions += 1;
+                        return { type: 'object', properties: {} };
+                    }
+                }
+            }
+        };
+
+        for (let index = 0; index < 2; index += 1) {
+            const server = new McpServer({ name: `server-${index}`, version: '1.0.0' });
+            server.registerTool('cached', { inputSchema: schema, outputSchema: schema }, async () => ({
+                content: [],
+                structuredContent: {}
+            }));
+        }
+
+        expect(inputConversions).toBe(1);
+        expect(outputConversions).toBe(1);
+    });
+
     it('registerTool accepts a raw shape for inputSchema and auto-wraps it', () => {
         const server = new McpServer({ name: 't', version: '1.0.0' });
 

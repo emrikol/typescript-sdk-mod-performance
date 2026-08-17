@@ -206,9 +206,8 @@ describe('response cache document codec', () => {
             await expect(cache.toolDefinition('a')).resolves.toBeUndefined();
             await expect(cache.toolDefinition('a')).resolves.toBeUndefined();
             await expect(cache.outputValidator('a', () => undefined)).resolves.toBeUndefined();
-            // Memoized against the unchanged stamp: one report for the tool
-            // index, one for the validator index — not one per lookup.
-            expect(reported).toHaveLength(2);
+            // Both lookups share one decoded tool index for the stamp.
+            expect(reported).toHaveLength(1);
             expect(String(reported[0])).toMatch(/tools array/);
         }
     });
@@ -261,7 +260,32 @@ describe('response cache document codec', () => {
         await expect(cache.toolDefinition('a')).resolves.toBeUndefined();
         await expect(cache.toolDefinition('a')).resolves.toBeUndefined();
         await expect(cache.outputValidator('a', () => undefined)).resolves.toBeUndefined();
-        expect(reported).toHaveLength(2);
+        expect(reported).toHaveLength(1);
         expect(String(reported[0])).toMatch(/malformed tools array/);
+    });
+
+    test('decodes a tools list once and compiles output validators only for requested tools', async () => {
+        const store: ResponseCacheStore = {
+            get: () => ({
+                value: JSON.stringify({ tools: [{ name: 'a' }, { name: 'b' }, { name: 'unused' }] }),
+                stamp: 3,
+                scope: 'private' as const
+            }),
+            set: () => 1,
+            delete: () => {},
+            evict: () => {},
+            clear: () => {}
+        };
+        const cache = new ClientResponseCache(store, true);
+        const compiled: string[] = [];
+        const compile = (tool: { name: string }) => {
+            compiled.push(tool.name);
+            return tool.name;
+        };
+
+        await expect(cache.outputValidator('a', compile)).resolves.toBe('a');
+        await expect(cache.outputValidator('a', compile)).resolves.toBe('a');
+        await expect(cache.outputValidator('b', compile)).resolves.toBe('b');
+        expect(compiled).toEqual(['a', 'b']);
     });
 });

@@ -37,11 +37,11 @@ function readManifest(relativeDir: string): PackageManifest {
 const PUBLIC_PACKAGES: Record<string, { name: string; exportKeys: string[]; bin?: Record<string, string> }> = {
     client: {
         name: '@modelcontextprotocol/client',
-        exportKeys: ['.', './stdio', './validators/ajv', './validators/cf-worker', './_shims']
+        exportKeys: ['.', './runtime', './stdio', './validators/ajv', './validators/cf-worker', './_shims']
     },
     server: {
         name: '@modelcontextprotocol/server',
-        exportKeys: ['.', './stdio', './validators/ajv', './validators/cf-worker', './_shims']
+        exportKeys: ['.', './runtime', './stdio', './validators/ajv', './validators/cf-worker', './_shims']
     },
     'server-legacy': {
         name: '@modelcontextprotocol/server-legacy',
@@ -56,7 +56,7 @@ const PUBLIC_PACKAGES: Record<string, { name: string; exportKeys: string[]; bin?
         // './internal' is the wholesale internal seam the sibling SDK packages resolve at
         // runtime (their bundles keep `@modelcontextprotocol/core/internal` imports external);
         // it is not public API — the curated public surface stays the root entry.
-        exportKeys: ['.', './internal']
+        exportKeys: ['.', './internal', './internal/constants', './internal/elicitation', './internal/list-changed']
     },
     codemod: {
         name: '@modelcontextprotocol/codemod',
