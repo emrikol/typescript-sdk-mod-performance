@@ -23,7 +23,7 @@ Optional framework adapters: [`@modelcontextprotocol/express`](https://www.npmjs
 
 ## Performance-oriented runtime entry
 
-This fork also exports `@modelcontextprotocol/server/runtime`. It has the same complete server API and TypeScript types as the package root, but it does not eagerly load the optional public Zod protocol-schema catalog. Session-style HTTP loads its full message schemas on first use; modern per-request HTTP and long-lived transports construct only the wire era they actually serve.
+This fork also exports `@modelcontextprotocol/server/runtime`. It has the same complete server API and TypeScript types as the package root, but it does not eagerly load the optional public Zod protocol-schema catalog. Session-style HTTP loads its full message schemas on first use; modern per-request HTTP and long-lived transports construct only the wire era they actually serve. The Node default JSON Schema validator is split into a dynamic chunk: importing the runtime, constructing a server, registering raw JSON schemas, `server/discover`, and `tools/list` do not evaluate AJV.
 
 ```ts
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server/runtime';
@@ -31,9 +31,11 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server/runtim
 
 Use the package root when the same module also imports public runtime schema constants. Use `/runtime` for servers that only register and serve tools, resources, and prompts. `preloadSchemas()` remains available when moving one-time schema construction into startup is preferable to first-request latency.
 
-Immutable schema conversion, tool-header scans, and discovery lists are cached in bounded `WeakMap` or per-server generation caches. Registry updates invalidate the affected discovery cache immediately; no idle timers or background unloading are used.
+Wrap hand-authored JSON Schema with `fromJsonSchema()`. It retains and advertises the raw schema without compiling it; the selected tool's input validator, and then its output validator when a successful structured result needs validation, compile lazily on the first `tools/call`. Other tools remain cold. The wrapper remains a Standard Schema implementation, and its `validate()` method may resolve asynchronously while the default provider is loading.
 
-On a memory-constrained server, pass `{ performanceCaches: false }` as the second `McpServer` constructor argument. The option defaults to `true`; disabling it bypasses schema-conversion and tool-header caches, retained converted tool schemas, discovery-list caches, and resource-template indexes without changing validation, schemas, inventory, cache hints, protocol behavior, or wire output.
+Compiled validators, immutable schema conversion, tool-header scans, and discovery lists are cached in bounded `WeakMap` or per-server generation caches. Registry updates invalidate the affected discovery and validator caches immediately; no idle timers or background unloading are used.
+
+On a memory-constrained server, pass `{ performanceCaches: false }` as the second `McpServer` constructor argument. The option defaults to `true`; disabling it bypasses compiled-validator retention, the retained default validator provider, schema-conversion and tool-header caches, retained converted tool schemas, discovery-list caches, and resource-template indexes. Derived validators are request-scoped and discarded after the call. Validation, schemas, inventory, cache hints, protocol behavior, and wire output remain unchanged.
 
 ```ts
 const server = new McpServer({ name: 'low-memory-server', version: '1.0.0' }, { performanceCaches: false });
@@ -45,7 +47,7 @@ Run the reproducible HTTP profile with:
 pnpm profile:server -- --iterations 20000 --runs 7
 ```
 
-The profiler compares fresh-process medians for runtime+caching, runtime+no-caching, and root+caching. It reports cold import, registration, discovery, first-request and 20,000-request hot-path CPU/wall time, latency, throughput, and post-GC heap/RSS.
+The profiler compares fresh-process medians for runtime+caching, runtime+no-caching, and root+caching. It separately reports cold import, registration, `server/discover`, `tools/list`, first `tools/call`, and 20,000-request hot-path CPU/wall time, latency, throughput, post-GC heap/RSS, validator compilation counts, and loaded-module state.
 
 ## Documentation
 

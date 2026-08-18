@@ -4,7 +4,7 @@ Node.js adapters for the MCP TypeScript server SDK.
 
 This package is a thin Node.js integration layer for [`@modelcontextprotocol/server`](https://github.com/modelcontextprotocol/typescript-sdk/tree/main/packages/server). It provides a Streamable HTTP transport that works with Node’s `IncomingMessage` / `ServerResponse`.
 
-Its operational imports use `@modelcontextprotocol/server/runtime`, so importing the adapter does not evaluate the complete server root or optional public protocol-schema catalog. Wire-schema construction remains lazy; the adapter never calls `preloadSchemas()`.
+Its operational imports use `@modelcontextprotocol/server/runtime`, so importing the adapter does not evaluate the complete server root, optional public protocol-schema catalog, AJV provider, or either wire-schema graph. Wire-schema construction remains lazy; the adapter never calls `preloadSchemas()`. AJV is dynamically imported only when a server actually validates a raw JSON Schema, not during `server/discover` or `tools/list`.
 
 For web‑standard runtimes (Cloudflare Workers, Deno, Bun, etc.), use `WebStandardStreamableHTTPServerTransport` from `@modelcontextprotocol/server` directly.
 

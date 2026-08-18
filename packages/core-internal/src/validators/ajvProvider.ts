@@ -10,6 +10,21 @@ import _addFormats from 'ajv-formats';
 import { declaredDialect } from './dialects';
 import type { JsonSchemaType, JsonSchemaValidator, jsonSchemaValidator, JsonSchemaValidatorResult } from './types';
 
+type AjvModuleDiagnostics = {
+    moduleEvaluations: number;
+    validatorCompilations: number;
+};
+
+// Fresh-process tests and the deterministic profiler need to observe whether
+// the optional provider was evaluated without importing it to ask. The
+// symbol-keyed record is diagnostic-only and intentionally not a package API.
+const diagnosticsKey = Symbol.for('@modelcontextprotocol/sdk/ajv-provider-diagnostics');
+const diagnosticsGlobal = globalThis as typeof globalThis & { [key: symbol]: unknown };
+const existingDiagnostics = diagnosticsGlobal[diagnosticsKey] as AjvModuleDiagnostics | undefined;
+const diagnostics: AjvModuleDiagnostics = existingDiagnostics ?? { moduleEvaluations: 0, validatorCompilations: 0 };
+diagnostics.moduleEvaluations += 1;
+diagnosticsGlobal[diagnosticsKey] = diagnostics;
+
 /** Structural subset of the AJV interface used by {@link AjvJsonSchemaValidator}. */
 interface AjvLike {
     compile: (schema: unknown) => AjvValidateFunction;
@@ -129,6 +144,7 @@ export class AjvJsonSchemaValidator implements jsonSchemaValidator {
     }
 
     getValidator<T>(schema: JsonSchemaType): JsonSchemaValidator<T> {
+        diagnostics.validatorCompilations += 1;
         const engine = this._engineFor(schema);
         const ajvValidator =
             '$id' in schema && typeof schema.$id === 'string'

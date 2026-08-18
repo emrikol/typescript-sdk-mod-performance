@@ -3,9 +3,14 @@
  *
  * This file is selected via package.json export conditions when running in workerd.
  */
+import type { jsonSchemaValidator } from '@modelcontextprotocol/core-internal/server-runtime';
 import { preloadSchemas } from '@modelcontextprotocol/core-internal/server-runtime';
 
-export { CfWorkerJsonSchemaValidator as DefaultJsonSchemaValidator } from '@modelcontextprotocol/core-internal/validators/cfWorker';
+/** @internal Runtime-selected default, loaded only when validation is requested. */
+export async function loadDefaultJsonSchemaValidator(): Promise<jsonSchemaValidator> {
+    const { CfWorkerJsonSchemaValidator } = await import('@modelcontextprotocol/core-internal/validators/cfWorker');
+    return new CfWorkerJsonSchemaValidator();
+}
 
 // Platform asymmetry: isolate platforms like workerd evaluate module scope
 // during deployment/isolate warm-up, outside any request's billed CPU, while

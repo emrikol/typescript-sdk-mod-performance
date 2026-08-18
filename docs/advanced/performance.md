@@ -12,9 +12,12 @@ The SDK keeps the complete MCP feature set while avoiding work until its feature
 
 Session-style Streamable HTTP dynamically loads its exact JSON-RPC schemas on its first POST. Wire schemas remain memoized per era. Call `preloadSchemas()` during startup only on runtimes where predictable first-request latency matters more than cold memory.
 
+On Node.js, the default AJV provider is a separate dynamic chunk. Importing `server/runtime`, constructing a server, registering tools with `fromJsonSchema()`, `server/discover`, and `tools/list` do not evaluate AJV. `fromJsonSchema()` advertises its raw schema directly and loads AJV only when a call needs validation. On that first `tools/call`, only the selected tool's input validator and any required output validator compile; other registered tools remain cold.
+
 ## Caches
 
 - Standard Schema to JSON Schema conversion is cached by schema object in a `WeakMap`, so shared definitions across stateless request factories convert once and remain collectible.
+- Compiled `fromJsonSchema()` validators are cached by wrapper and selected tool. Registration and discovery retain no compiled validator.
 - `x-mcp-header` scans share the converted-schema cache.
 - Tool, prompt, static-resource, and resource-template discovery results are cached once per server registry generation. Any registration update invalidates the relevant cache.
 - Resource-template completion uses a generation-cached URI lookup instead of scanning all templates for every completion.
@@ -32,7 +35,7 @@ For a memory-constrained server, disable all server-side performance caches on t
 const server = new McpServer({ name: 'low-memory-server', version: '1.0.0' }, { performanceCaches: false });
 ```
 
-`performanceCaches` defaults to `true`. Setting it to `false` bypasses the JSON-Schema conversion WeakMaps, `x-mcp-header` scan cache, retained converted tool schemas, discovery-list caches, and resource-template indexes. It does not alter validation, schemas, inventory, cache hints, protocol behavior, or serialized responses. The option is per server and is never read from an environment variable.
+`performanceCaches` defaults to `true`. Setting it to `false` bypasses compiled-validator retention, the retained default validator provider, JSON-Schema conversion WeakMaps, `x-mcp-header` scan cache, retained converted tool schemas, discovery-list caches, and resource-template indexes. The default provider and compiled input/output functions are request-scoped and discarded after the call. It does not alter validation, schemas, inventory, cache hints, protocol behavior, or serialized responses. The option is per server and is never read from an environment variable. A custom validator provider remains owned by its caller, so any caches inside that custom implementation are likewise caller-owned.
 
 ## Profile
 
@@ -45,27 +48,33 @@ pnpm --filter @modelcontextprotocol/client build
 pnpm profile:client -- packages/client/dist/runtime.mjs 20000
 ```
 
-The server profiler launches a fresh process for every sample and reports medians for `runtime+caching`, `runtime+no-caching`, and the `root+caching` baseline. Each process records cold import, post-registration, post-discovery (`server/discover` plus `tools/list`), first `tools/call`, 20,000 hot `tools/call` requests, and post-close GC heap/RSS, with wall time, CPU, latency, and throughput. Add `--include-samples` to retain all raw runs in the JSON report.
+The server profiler launches a fresh process for every sample and reports medians for `runtime+caching`, `runtime+no-caching`, and the `root+caching` baseline. Each process separately records cold import, post-registration, post-`server/discover`, post-`tools/list`, first `tools/call`, 20,000 hot `tools/call` requests, and post-close GC heap/RSS, with wall time, CPU, latency, throughput, validator compilation counts, and loaded-module state. Add `--include-samples` to retain all raw runs in the JSON report.
 
 The profile exercises real modern HTTP requests through `Request`, JSON parsing, protocol classification, schema validation, dispatch, response encoding, and teardown. Keep transport overhead separate from SDK overhead when interpreting results: Fetch `Request`/`Response`, JSON parsing, and Web Streams can dominate a fast handler.
 
 ### Measured tradeoff
 
-The following is the seven-run median from 2026-08-17 on Node 22.19.0, macOS arm64. Registration uses 128 tools with distinct Zod schema objects; discovery performs `server/discover` and `tools/list`; the hot phase performs 20,000 modern `tools/call` requests through a fresh-server-per-request factory. Memory values are measured after forced GC. Times and RSS are host-sensitive, so rerun the command above on the deployment class you care about.
+The following is the seven-run median from 2026-08-17 on Node 22.19.0, macOS arm64. Registration uses 128 tools with distinct raw JSON Schemas wrapped by `fromJsonSchema()`; the hot phase performs 20,000 modern `tools/call` requests through a fresh-server-per-request factory. Memory values are measured after forced GC. Times and especially RSS are host-sensitive, so rerun the command above on the deployment class you care about.
 
-| Metric                         |    runtime+caching |     runtime+no-caching |       root+caching |
-| ------------------------------ | -----------------: | ---------------------: | -----------------: |
-| Cold import wall time          |           35.94 ms |               35.69 ms |           52.32 ms |
-| Cold import heap / RSS delta   |   5.17 / 16.22 MiB |       5.17 / 16.11 MiB |  10.76 / 26.45 MiB |
-| Post-registration heap delta   |           0.59 MiB |               0.29 MiB |           0.59 MiB |
-| Post-discovery heap            |          19.74 MiB |              19.44 MiB |          25.09 MiB |
-| First request                  |            0.87 ms |                1.21 ms |            0.91 ms |
-| 20,000 hot requests wall / CPU | 477.33 / 688.10 ms | 2,298.46 / 2,542.74 ms | 483.80 / 703.68 ms |
-| Hot latency                    |   23.87 µs/request |      114.92 µs/request |   24.19 µs/request |
-| Hot throughput                 |  41,900 requests/s |       8,701 requests/s |  41,339 requests/s |
-| Post-close GC heap / RSS       | 20.92 / 118.30 MiB |     20.68 / 116.72 MiB | 26.26 / 124.36 MiB |
+| Metric                                          |             runtime+caching |          runtime+no-caching |                root+caching |
+| ----------------------------------------------- | --------------------------: | --------------------------: | --------------------------: |
+| Cold import wall / CPU                          |            27.30 / 31.47 ms |            26.52 / 30.78 ms |            41.13 / 50.31 ms |
+| Cold import heap / RSS delta                    |            4.19 / 14.77 MiB |            4.19 / 14.59 MiB |            9.78 / 24.56 MiB |
+| Post-registration wall / heap delta             |          3.84 ms / 0.25 MiB |          3.65 ms / 0.17 MiB |          3.69 ms / 0.25 MiB |
+| Post-`server/discover` heap / RSS               |           16.22 / 74.94 MiB |           16.15 / 74.80 MiB |           21.56 / 85.39 MiB |
+| Post-`tools/list` wall / heap / RSS             | 1.02 ms / 16.25 / 75.20 MiB | 0.99 ms / 16.18 / 74.86 MiB | 1.14 ms / 21.59 / 85.61 MiB |
+| First tool call wall / CPU                      |            18.20 / 20.02 ms |            18.60 / 24.14 ms |            17.70 / 19.95 ms |
+| 20,000 hot calls wall / CPU                     |        706.27 / 1,187.96 ms |    12,344.07 / 13,327.27 ms |        712.23 / 1,199.26 ms |
+| Hot latency                                     |            35.31 µs/request |           617.20 µs/request |            35.61 µs/request |
+| Hot throughput                                  |           28,318 requests/s |            1,620 requests/s |           28,081 requests/s |
+| Validator compilations after list / first / hot |                   0 / 2 / 2 |              0 / 2 / 40,002 |                   0 / 2 / 2 |
+| Post-close GC heap / RSS                        |          19.43 / 199.80 MiB |          19.41 / 168.81 MiB |          24.78 / 225.64 MiB |
 
-On this workload, disabling caches saved about 0.24 MiB post-GC heap and 1.58 MiB RSS, while hot request latency increased 4.8× and throughput fell about 79%. Selecting `/runtime` with caching retained the cached hot-path performance while saving about 5.34 MiB heap and 6.06 MiB RSS versus the root+caching baseline after the run. The cache-off mode is therefore intended for memory ceilings where a small retained-heap reduction matters more than CPU capacity; `/runtime` is the broadly favorable default for operational-only servers.
+Loaded-module telemetry was deterministic across all samples: AJV stayed unloaded through `tools/list`, then loaded once on the first tool call. The runtime entry never evaluated the optional public schema catalog; the root baseline did. `server/discover` constructed the 2026 wire schema graph, while the unused 2025 graph stayed unbuilt.
+
+On this workload, disabling caches saved about 0.03 MiB post-GC heap and 30.98 MiB RSS, while hot request latency increased 17.5× and throughput fell 94.3% because 40,002 request-scoped validators were compiled instead of two. Selecting `/runtime` with caching saved 5.59 MiB heap and 9.80 MiB RSS at cold import, and 5.35 MiB heap and 25.84 MiB RSS after the run, versus the root+caching baseline. This matches the intended tradeoff: cache-off is for hard memory ceilings and low request volume; `/runtime` with caching is the general-purpose server default.
+
+For context, the supplied Ecobee MCP reference is a 47.9 KiB `tools/list` document (5.4 KiB gzip), about 1.74 MiB retained heap for first schema setup, about 32 KiB for an additional per-request registry, and a 5.6 MiB heap / 9.8 MiB RSS root-versus-runtime import opportunity. This local fixture measured a 1.59 MiB first-call heap increase, about 28 KiB after `tools/list`, and a 5.59 MiB / 9.80 MiB cold-import difference respectively. The Ecobee payload itself was not re-run by this deterministic local profiler.
 
 For CPU flamegraphs, run a single worker with Node's built-in profiler flags:
 

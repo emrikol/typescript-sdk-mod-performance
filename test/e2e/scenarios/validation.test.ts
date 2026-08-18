@@ -262,12 +262,14 @@ verifies('validators:custom-validator:override', async ({ transport }: TestArgs)
         client
     );
 
-    // The supplied validator (not the runtime default) compiled the registered schema.
-    expect(recorder.compiledSchemas).toEqual([GREET_INPUT_SCHEMA]);
+    // Registration and discovery retain only the raw schema; the supplied
+    // validator remains cold until this specific tool is called.
+    expect(recorder.compiledSchemas).toEqual([]);
 
     // The supplied validator is consulted on tools/call and its accept verdict lets the handler run.
     const accepted = await client.callTool({ name: 'greet', arguments: { name: 'Ada' } });
     expect(accepted.content).toEqual([{ type: 'text', text: 'Hello, Ada!' }]);
+    expect(recorder.compiledSchemas).toEqual([GREET_INPUT_SCHEMA]);
     expect(recorder.validatedInputs).toEqual([{ name: 'Ada' }]);
 
     // 'vetoed' conforms to the JSON Schema (the default validator would run the handler), so only the supplied validator can gate it.

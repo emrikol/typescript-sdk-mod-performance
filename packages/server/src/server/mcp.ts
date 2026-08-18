@@ -9,6 +9,7 @@ import type {
     Icon,
     Implementation,
     InputRequiredResult,
+    JsonSchemaValidator,
     ListPromptsResult,
     ListResourcesResult,
     ListResourceTemplatesResult,
@@ -34,6 +35,7 @@ import {
     assertCompleteRequestResourceTemplate,
     assertValidCacheHint,
     attachCacheHintFallback,
+    compileFromJsonSchemaValidator,
     isInputRequiredResult,
     normalizeRawShapeSchema,
     promptArgumentsFromStandardSchema,
@@ -112,6 +114,8 @@ export class McpServer {
     private _listedResourceTemplates: ListResourceTemplatesResult['resourceTemplates'] | undefined;
     private _resourceTemplateValues: RegisteredResourceTemplate[] | undefined;
     private _resourceTemplatesByUri: Map<string, RegisteredResourceTemplate> | undefined;
+    private readonly _toolInputValidators = new WeakMap<RegisteredTool, JsonSchemaValidator<unknown>>();
+    private readonly _toolOutputValidators = new WeakMap<RegisteredTool, JsonSchemaValidator<unknown>>();
     /**
      * Per-tool JSON-converted `inputSchema`, memoized so the SEP-2243
      * registration-time scan and the pre-dispatch validation step share one
@@ -403,7 +407,7 @@ export class McpServer {
             return undefined as Args;
         }
 
-        const parseResult = await validateStandardSchema(tool.inputSchema, args ?? {});
+        const parseResult = await this._validateToolSchema(tool, tool.inputSchema, args ?? {}, this._toolInputValidators);
         if (!parseResult.success) {
             throw new ProtocolError(
                 ProtocolErrorCode.InvalidParams,
@@ -444,13 +448,40 @@ export class McpServer {
         }
 
         // if the tool has an output schema, validate structured content
-        const parseResult = await validateStandardSchema(tool.outputSchema, result.structuredContent);
+        const parseResult = await this._validateToolSchema(tool, tool.outputSchema, result.structuredContent, this._toolOutputValidators);
         if (!parseResult.success) {
             throw new ProtocolError(
                 ProtocolErrorCode.InvalidParams,
                 `Output validation error: Invalid structured content for tool ${toolName}: ${parseResult.error}`
             );
         }
+    }
+
+    /**
+     * `fromJsonSchema()` wrappers expose their raw validator source through an
+     * internal weak registration. That lets McpServer own the compiled
+     * function's lifetime: cache-on retains it per tool, while cache-off
+     * compiles for this call and drops it. Other Standard Schema libraries
+     * continue through their native validation method unchanged.
+     */
+    private async _validateToolSchema<T>(
+        tool: RegisteredTool,
+        schema: StandardSchemaWithJSON,
+        data: unknown,
+        cache: WeakMap<RegisteredTool, JsonSchemaValidator<unknown>>
+    ): Promise<{ success: true; data: T } | { success: false; error: string }> {
+        let validator = this._performanceCachesEnabled ? cache.get(tool) : undefined;
+        if (validator === undefined) {
+            validator = await compileFromJsonSchemaValidator<T>(schema, this._performanceCachesEnabled);
+            if (validator !== undefined && this._performanceCachesEnabled) cache.set(tool, validator);
+        }
+
+        if (validator === undefined) {
+            return validateStandardSchema(schema, data) as Promise<{ success: true; data: T } | { success: false; error: string }>;
+        }
+
+        const result = validator(data);
+        return result.valid ? { success: true, data: result.data as T } : { success: false, error: result.errorMessage };
     }
 
     /**
@@ -1013,6 +1044,7 @@ export class McpServer {
                 if (updates.paramsSchema !== undefined) {
                     registeredTool.inputSchema = updates.paramsSchema;
                     delete this._toolInputSchemaJson[name];
+                    this._toolInputValidators.delete(registeredTool);
                     needsExecutorRegen = true;
                 }
                 if (updates.callback !== undefined) {
@@ -1027,6 +1059,7 @@ export class McpServer {
                 if (updates.outputSchema !== undefined) {
                     registeredTool.outputSchema = updates.outputSchema;
                     registeredTool.outputSchemaJson = convertOutputSchemaJson(updates.outputSchema, this._performanceCachesEnabled);
+                    this._toolOutputValidators.delete(registeredTool);
                 }
                 if (updates.annotations !== undefined) registeredTool.annotations = updates.annotations;
                 if (updates.icons !== undefined) registeredTool.icons = updates.icons;

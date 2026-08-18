@@ -521,9 +521,9 @@ verifies('2025:jsonschema:ref-rewrite-scope', async ({ transport }: TestArgs) =>
     // unrewritten (they resolve against the embedded base, not the wrapper root).
     //
     // Listing-only assertion: Ajv2020 stack-overflows when the compiled validator for a
-    // `$dynamicRef` with a JSON-Pointer fragment (rather than a `$dynamicAnchor`) is RUN — compile
-    // succeeds (fromJsonSchema below calls it eagerly), validation does not — so the tool is
-    // intentionally never called; the rewrite contract is about the wrapped SCHEMA in tools/list.
+    // `$dynamicRef` with a JSON-Pointer fragment (rather than a `$dynamicAnchor`) is RUN. The tool
+    // is intentionally never called, so lazy fromJsonSchema validation never compiles or executes
+    // that validator; the rewrite contract is about the wrapped SCHEMA in tools/list.
     const NATURAL = {
         anyOf: [{ $dynamicRef: '#/$defs/X' }, { const: { $ref: '#/foo' } }],
         $defs: {

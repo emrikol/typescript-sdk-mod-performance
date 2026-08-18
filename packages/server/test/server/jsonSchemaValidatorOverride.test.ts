@@ -89,6 +89,9 @@ describe('server JSON Schema validator overrides', () => {
         };
 
         const standardSchema = fromJsonSchema<{ name: string }>(schema, validator);
+        expect(validator.schemas).toEqual([]);
+        expect(standardSchema['~standard'].jsonSchema.input({ target: 'draft-2020-12' })).toBe(schema);
+        expect(validator.schemas).toEqual([]);
         expect(standardSchema['~standard'].validate({ name: 123 })).toEqual({ value: { name: 123 } });
 
         expect(validator.schemas).toEqual([schema]);

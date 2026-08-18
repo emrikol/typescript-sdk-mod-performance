@@ -17,6 +17,11 @@ import {
 import type { StandardSchemaV1, StandardSchemaV1Sync } from '../util/standardSchema';
 import * as schemas from './schemas';
 
+// Diagnostic-only loaded-state marker used by fresh-process import tests and
+// the profiler. Runtime entry points never import this optional catalog.
+const catalogDiagnosticsGlobal = globalThis as typeof globalThis & { [key: symbol]: unknown };
+catalogDiagnosticsGlobal[Symbol.for('@modelcontextprotocol/sdk/public-schema-catalog')] = true;
+
 /**
  * Explicit allowlist of protocol Zod schemas that correspond to a public spec type in `types.ts`.
  *

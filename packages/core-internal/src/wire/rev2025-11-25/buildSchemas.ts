@@ -2433,5 +2433,10 @@ export function schemasBuilt2025(): boolean {
  * every consumer.
  */
 export function buildSchemas2025(): Rev2025WireSchemas {
-    return (memo ??= build());
+    if (memo === undefined) {
+        memo = build();
+        const diagnosticsGlobal = globalThis as typeof globalThis & { [key: symbol]: unknown };
+        diagnosticsGlobal[Symbol.for('@modelcontextprotocol/sdk/wire-schema-2025-built')] = true;
+    }
+    return memo;
 }

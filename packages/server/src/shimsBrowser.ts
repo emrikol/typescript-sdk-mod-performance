@@ -7,7 +7,13 @@
  * `preloadSchemas()` call: in a browser, module evaluation is page load —
  * boot latency — so schema construction stays lazy, exactly like Node.
  */
-export { CfWorkerJsonSchemaValidator as DefaultJsonSchemaValidator } from '@modelcontextprotocol/core-internal/validators/cfWorker';
+import type { jsonSchemaValidator } from '@modelcontextprotocol/core-internal/server-runtime';
+
+/** @internal Runtime-selected default, loaded only when validation is requested. */
+export async function loadDefaultJsonSchemaValidator(): Promise<jsonSchemaValidator> {
+    const { CfWorkerJsonSchemaValidator } = await import('@modelcontextprotocol/core-internal/validators/cfWorker');
+    return new CfWorkerJsonSchemaValidator();
+}
 
 /**
  * Stub process object for non-Node.js environments.

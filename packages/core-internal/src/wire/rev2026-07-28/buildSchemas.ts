@@ -1434,5 +1434,10 @@ export function schemasBuilt2026(): boolean {
  * every consumer.
  */
 export function buildSchemas2026(): Rev2026WireSchemas {
-    return (memo ??= build());
+    if (memo === undefined) {
+        memo = build();
+        const diagnosticsGlobal = globalThis as typeof globalThis & { [key: symbol]: unknown };
+        diagnosticsGlobal[Symbol.for('@modelcontextprotocol/sdk/wire-schema-2026-built')] = true;
+    }
+    return memo;
 }

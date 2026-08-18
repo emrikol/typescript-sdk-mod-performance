@@ -19,6 +19,7 @@ import type {
     InitializeResult,
     JSONRPCRequest,
     JsonSchemaType,
+    JsonSchemaValidator,
     jsonSchemaValidator,
     ListRootsRequest,
     ListRootsResult,
@@ -57,7 +58,7 @@ import {
     SdkErrorCode,
     withRequestStateValue
 } from '@modelcontextprotocol/core-internal/server-runtime';
-import { DefaultJsonSchemaValidator } from '@modelcontextprotocol/server/_shims';
+import { loadDefaultJsonSchemaValidator } from '@modelcontextprotocol/server/_shims';
 
 import { coerceEmbeddedInputRequest, LegacyInputRequiredShim, resolveLegacyShimOptions } from './legacyInputRequiredShim';
 
@@ -91,6 +92,8 @@ export type ServerOptions = ProtocolOptions & {
      *
      * The validator is used to validate user input returned from elicitation
      * requests against the requested schema.
+     * The runtime-selected default is loaded and constructed only when an
+     * accepted form response actually requires JSON Schema validation.
      *
      * @default Runtime-selected validator (AJV-backed on Node.js, `@cfworker/json-schema`-backed on browser/workerd runtimes)
      */
@@ -117,9 +120,9 @@ export type ServerOptions = ProtocolOptions & {
     cacheHints?: Partial<Record<CacheableResultMethod, CacheHint>>;
 
     /**
-     * Retain the SDK's performance caches for immutable schema conversions,
-     * tool-header scans, converted tool schemas, discovery lists, and resource
-     * template indexes.
+     * Retain the SDK's performance caches for compiled JSON Schema validators,
+     * immutable schema conversions, tool-header scans, converted tool schemas,
+     * discovery lists, and resource template indexes.
      *
      * Set this to `false` for memory-constrained servers that prefer to redo
      * this work instead of retaining it. This changes only the CPU/memory
@@ -294,7 +297,10 @@ export class Server extends Protocol<ServerContext> {
     }
     private _capabilities: ServerCapabilities;
     private _instructions?: string;
-    private _jsonSchemaValidator: jsonSchemaValidator;
+    private readonly _performanceCachesEnabled: boolean;
+    private readonly _jsonSchemaValidator?: jsonSchemaValidator;
+    private _defaultJsonSchemaValidator?: Promise<jsonSchemaValidator>;
+    private readonly _compiledJsonSchemaValidators = new WeakMap<object, JsonSchemaValidator<unknown>>();
     private _cacheHints?: ServerOptions['cacheHints'];
     private _requestStateVerify?: (state: string, ctx: ServerContext) => unknown | Promise<unknown>;
     private _inputRequiredServing: { maxRounds: number; roundTimeoutMs: number; legacyShim: boolean };
@@ -328,7 +334,8 @@ export class Server extends Protocol<ServerContext> {
         super(options);
         this._capabilities = options?.capabilities ? { ...options.capabilities } : {};
         this._instructions = options?.instructions;
-        this._jsonSchemaValidator = options?.jsonSchemaValidator ?? new DefaultJsonSchemaValidator();
+        this._performanceCachesEnabled = options?.performanceCaches ?? true;
+        this._jsonSchemaValidator = options?.jsonSchemaValidator;
         this._requestStateVerify = options?.requestState?.verify;
 
         this._inputRequiredServing = resolveLegacyShimOptions(options?.inputRequired);
@@ -1243,7 +1250,7 @@ export class Server extends Protocol<ServerContext> {
 
                 if (validateAcceptedContent && result.action === 'accept' && result.content && formParams.requestedSchema) {
                     try {
-                        const validator = this._jsonSchemaValidator.getValidator(formParams.requestedSchema as JsonSchemaType);
+                        const validator = await this._validatorForJsonSchema(formParams.requestedSchema as JsonSchemaType);
                         const validationResult = validator(result.content);
 
                         if (!validationResult.valid) {
@@ -1265,6 +1272,28 @@ export class Server extends Protocol<ServerContext> {
                 return result;
             }
         }
+    }
+
+    /**
+     * Resolve one JSON Schema validator at the point validation is required.
+     * The default provider is dynamically imported here; discovery-only
+     * servers never evaluate AJV. Cache-disabled servers retain neither the
+     * provider nor the compiled function after this request.
+     */
+    private async _validatorForJsonSchema(schema: JsonSchemaType): Promise<JsonSchemaValidator<unknown>> {
+        if (this._performanceCachesEnabled) {
+            const cached = this._compiledJsonSchemaValidators.get(schema);
+            if (cached !== undefined) return cached;
+        }
+
+        const provider =
+            this._jsonSchemaValidator ??
+            (this._performanceCachesEnabled
+                ? await (this._defaultJsonSchemaValidator ??= loadDefaultJsonSchemaValidator())
+                : await loadDefaultJsonSchemaValidator());
+        const validator = provider.getValidator(schema);
+        if (this._performanceCachesEnabled) this._compiledJsonSchemaValidators.set(schema, validator);
+        return validator;
     }
 
     /**

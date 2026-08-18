@@ -225,7 +225,13 @@ export function standardSchemaToJsonSchema(schema: StandardJSONSchemaV1, io: 'in
         if (result.type !== undefined) return result;
         return isProvablyObjectShapedRoot(result) ? { type: 'object', ...result } : result;
     }
-    if (result.type !== undefined && result.type !== 'object') {
+    if (result.type === 'object') {
+        // Preserve an already-conforming raw JSON Schema by identity. This is
+        // especially important for fromJsonSchema(): discovery needs no
+        // normalized clone, and cache-disabled servers should not allocate one.
+        return result;
+    }
+    if (result.type !== undefined) {
         throw new Error(
             `MCP tool and prompt schemas must describe objects (got type: ${JSON.stringify(result.type)}). ` +
                 `Wrap your schema in z.object({...}) or equivalent.`

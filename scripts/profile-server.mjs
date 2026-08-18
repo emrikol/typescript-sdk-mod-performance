@@ -38,6 +38,18 @@ function memoryDelta(after, before) {
     };
 }
 
+function loadedModuleState() {
+    const diagnostics = globalThis[Symbol.for('@modelcontextprotocol/sdk/ajv-provider-diagnostics')];
+    return {
+        ajvProviderEvaluated: diagnostics !== undefined,
+        publicSchemaCatalogEvaluated: globalThis[Symbol.for('@modelcontextprotocol/sdk/public-schema-catalog')] === true,
+        wireSchema2025Built: globalThis[Symbol.for('@modelcontextprotocol/sdk/wire-schema-2025-built')] === true,
+        wireSchema2026Built: globalThis[Symbol.for('@modelcontextprotocol/sdk/wire-schema-2026-built')] === true,
+        ajvModuleEvaluations: diagnostics?.moduleEvaluations ?? 0,
+        validatorCompilations: diagnostics?.validatorCompilations ?? 0
+    };
+}
+
 async function timedStage(operation, beforeMemory) {
     const cpu = process.cpuUsage();
     const started = performance.now();
@@ -45,7 +57,7 @@ async function timedStage(operation, beforeMemory) {
     const wallMs = performance.now() - started;
     const cpuMs = cpuMilliseconds(cpu);
     const postGc = gcMemory();
-    return { wallMs, cpuMs, ...memoryDelta(postGc, beforeMemory), postGc };
+    return { wallMs, cpuMs, ...memoryDelta(postGc, beforeMemory), postGc, loadedModules: loadedModuleState() };
 }
 
 function modernRequest(method, id, params = {}) {
@@ -69,6 +81,7 @@ function modernRequest(method, id, params = {}) {
             'content-type': 'application/json',
             'mcp-method': method,
             ...(typeof params.name === 'string' && { 'mcp-name': params.name }),
+            ...(typeof params.arguments?.text === 'string' && { 'mcp-param-text': params.arguments.text }),
             'mcp-protocol-version': '2026-07-28'
         },
         body: JSON.stringify(body)
@@ -86,20 +99,37 @@ async function runWorker(moduleUrl, performanceCaches, iterations) {
         sdk = await import(moduleUrl);
     }, baseline);
 
-    // Application schemas are prepared after the SDK import so the cold-import
-    // measurement includes the root entry's public catalog only when that entry
-    // actually loads it. Schema setup itself is outside the registration timer.
-    const z = await import('zod/v4');
-    const fields = {};
-    for (let index = 0; index < 24; index += 1) fields[`field${index}`] = z.string().optional();
-    fields.text = z.string().meta({ 'x-mcp-header': 'Text' });
-    const echoInputSchema = z.object(fields);
-    const echoOutputSchema = z.object({ text: z.string() });
+    // Raw application schemas are prepared after the SDK import so the cold
+    // import measurement includes only the selected entry point. Wrapping
+    // them with fromJsonSchema must not evaluate or compile AJV.
+    const rawInputSchema = label => {
+        const properties = {};
+        for (let index = 0; index < 24; index += 1) properties[`field${index}`] = { type: 'string' };
+        properties.text = { type: 'string', 'x-mcp-header': 'Text' };
+        return {
+            $schema: 'https://json-schema.org/draft/2020-12/schema',
+            title: `${label} input`,
+            type: 'object',
+            properties,
+            required: ['text'],
+            additionalProperties: false
+        };
+    };
+    const rawOutputSchema = label => ({
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        title: `${label} output`,
+        type: 'object',
+        properties: { text: { type: 'string' } },
+        required: ['text'],
+        additionalProperties: false
+    });
+    const echoInputSchema = sdk.fromJsonSchema(rawInputSchema('echo'));
+    const echoOutputSchema = sdk.fromJsonSchema(rawOutputSchema('echo'));
     const inventoryInputSchemas = [echoInputSchema];
     const inventoryOutputSchemas = [echoOutputSchema];
     for (let index = 1; index < INVENTORY_TOOLS; index += 1) {
-        inventoryInputSchemas.push(z.object(fields));
-        inventoryOutputSchemas.push(z.object({ text: z.string() }));
+        inventoryInputSchemas.push(sdk.fromJsonSchema(rawInputSchema(`tool-${index}`)));
+        inventoryOutputSchemas.push(sdk.fromJsonSchema(rawOutputSchema(`tool-${index}`)));
     }
 
     const options = { performanceCaches };
@@ -135,16 +165,21 @@ async function runWorker(moduleUrl, performanceCaches, iterations) {
     let previousMemory = registrationStage.postGc;
     const discoveryStage = await timedStage(async () => {
         await consume(await handler.fetch(modernRequest('server/discover', 0)));
-        await consume(await handler.fetch(modernRequest('tools/list', 1)));
     }, previousMemory);
-    discoveryStage.requests = 2;
+    discoveryStage.requests = 1;
 
     previousMemory = discoveryStage.postGc;
-    const firstRequestStage = await timedStage(async () => {
+    const toolsListStage = await timedStage(async () => {
+        await consume(await handler.fetch(modernRequest('tools/list', 1)));
+    }, previousMemory);
+    toolsListStage.requests = 1;
+
+    previousMemory = toolsListStage.postGc;
+    const firstToolCallStage = await timedStage(async () => {
         await consume(await handler.fetch(modernRequest('tools/call', 2, { name: 'echo', arguments: { text: 'hello' } })));
     }, previousMemory);
 
-    previousMemory = firstRequestStage.postGc;
+    previousMemory = firstToolCallStage.postGc;
     const hotStage = await timedStage(async () => {
         for (let index = 0; index < iterations; index += 1) {
             await consume(await handler.fetch(modernRequest('tools/call', index + 3, { name: 'echo', arguments: { text: 'hello' } })));
@@ -169,9 +204,14 @@ async function runWorker(moduleUrl, performanceCaches, iterations) {
             coldImport: importStage,
             postRegistration: registrationStage,
             postDiscovery: discoveryStage,
-            firstRequest: firstRequestStage,
+            postToolsList: toolsListStage,
+            firstToolCall: firstToolCallStage,
             hotRequests: hotStage,
-            postCloseGc: { ...postCloseGc, deltaFromBaseline: memoryDelta(postCloseGc, baseline) }
+            postCloseGc: {
+                ...postCloseGc,
+                deltaFromBaseline: memoryDelta(postCloseGc, baseline),
+                loadedModules: loadedModuleState()
+            }
         }
     };
 }
